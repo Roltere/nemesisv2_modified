@@ -36,9 +36,13 @@ while getopts "n:u:P:S:f:d:h" opt; do
   esac
 done
 
-# ── Logging ────────────────────────────────────────────
+# ── Logging & Environment Prep ────────────────────────
 exec > >(tee install.log) 2>&1
 echo "=== Starting Arch-VM install at $(date) ==="
+
+# load UK keymap and sync time—crucial before any downloads
+loadkeys uk
+timedatectl set-ntp true
 
 # ── Helpers ────────────────────────────────────────────
 die() { echo "$*" >&2; exit 1; }
@@ -49,45 +53,39 @@ prepare_disk() {
   swapoff -a
   umount -R /mnt 2>/dev/null || true
 
-  # detect disk if not set, filtering only TYPE=="disk"
+  # detect only real disks
   if [[ -z "$disk" ]]; then
-    disk=$(lsblk -dno NAME,TYPE \
-      | awk '$2=="disk" { print "/dev/" $1; exit }')
+    disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{ print "/dev/" $1; exit }')
   fi
-
-  [[ -b "$disk" ]] || die "Target disk $disk not found or not a block device!"
-
+  [[ -b "$disk" ]] || die "Target disk '$disk' not found or not a block device!"
   echo "Using target disk: $disk"
 
-  # GPT + partitions aligned
-  parted --script "$disk" \
-    mklabel gpt \
-    mkpart primary fat32 1MiB 261MiB \
-    set 1 boot on \
-    mkpart primary "${filesystem}" 261MiB 100%
+  # Create GPT and two aligned partitions
+  parted --script "$disk" mklabel gpt
+  parted --script "$disk" mkpart primary fat32 1MiB 261MiB
+  parted --script "$disk" set 1 boot on
+  parted --script "$disk" mkpart primary "$filesystem" 261MiB 100%
 
   disk1="${disk}1"
   disk2="${disk}2"
 
-  # format
+  echo "--- Formatting partitions ---"
   mkfs.fat -F32 "$disk1"
   mkfs."$filesystem" -F "$disk2"
 
-  mkdir -p /mnt
+  echo "--- Mounting root & EFI ---"
+  mkdir -p /mnt /mnt/boot
   mount "$disk2" /mnt
-  mkdir -p /mnt/boot
   mount "$disk1" /mnt/boot
 }
 
-
 # ── Stage 2: Swapfile ──────────────────────────────────
 setup_swap() {
-  echo "--- Setting up ${swap_size} swapfile ---"
+  echo "--- Creating ${swap_size} swapfile ---"
   fallocate -l "$swap_size" /mnt/swapfile
   chmod 600 /mnt/swapfile
   mkswap /mnt/swapfile
   swapon /mnt/swapfile
-  echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
 }
 
 # ── Stage 3: Install Base System ──────────────────────
@@ -96,7 +94,8 @@ install_base() {
   pacman --noconfirm -Sy --needed reflector
   reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist
 
-  pacstrap /mnt base linux-virtual linux-firmware \
+  pacstrap /mnt \
+    base linux-virtual linux-firmware \
     sudo base-devel yay networkmanager systemd-resolvconf \
     openssh git neovim tmux wget p7zip neofetch noto-fonts \
     ttf-noto-nerd fish less ldns open-vm-tools
@@ -106,28 +105,30 @@ install_base() {
 configure_chroot() {
   echo "--- Generating fstab ---"
   genfstab -U /mnt >> /mnt/etc/fstab
+  # now that /mnt/etc exists, add swap entry
+  echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
 
-  echo "--- Copying stage2 script ---"
-  cat > /mnt/nemesis-stage2.sh <<'EOF'
+  echo "--- Writing stage2 script into chroot ---"
+  cat > /mnt/nemesis-stage2.sh <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 trap 'echo "Chroot error on line \$LINENO"; exit 1' ERR
 
 # Variables from host
-hostname='"$hostname"'
-username='"$username"'
-password='"$password"'
+hostname="$hostname"
+username="$username"
+password="$password"
 
 # ── Locale & Time ─────────────────────────
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 hwclock --systohc
-echo en_GB.UTF-8 UTF-8 > /etc/locale.gen
+echo "en_GB.UTF-8 UTF-8" > /etc/locale.gen
 locale-gen
 echo LANG=en_GB.UTF-8 > /etc/locale.conf
 echo KEYMAP=uk > /etc/vconsole.conf
 
 # ── Hostname & Networking ───────────────────
-echo "$hostname" > /etc/hostname
+echo "\$hostname" > /etc/hostname
 rm -f /etc/resolv.conf
 ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 systemctl enable systemd-resolved
@@ -145,46 +146,12 @@ sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems keyboa
 mkinitcpio -P
 
 # ── Users & SSH ──────────────────────────────
-useradd -m -G wheel "$username"
-echo -e "$password\n$password" | passwd "$username"
-# force password change on first login
-chage -d 0 "$username"
+useradd -m -G wheel "\$username"
+echo -e "\$password\n\$password" | passwd "\$username"
+chage -d 0 "\$username"       # force password change on first login
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
 # ── Bootloader ───────────────────────────────
 pacman --noconfirm -Sy grub efibootmgr
 grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-grub-mkconfig -o /boot/grub/grub.cfg
-
-# ── VM‑specific services ──────────────────────
-systemctl enable sshd
-systemctl enable vmtoolsd
-systemctl enable vmware-vmblock-fuse
-systemctl enable vgauth.service
-systemctl enable vmhgfs-fuse.service
-
-EOF
-
-  chmod +x /mnt/nemesis-stage2.sh
-  echo "--- Entering chroot and running stage2 ---"
-  arch-chroot /mnt /nemesis-stage2.sh
-}
-
-# ── Stage 5: Cleanup ────────────────────────────────
-cleanup() {
-  echo "--- Cleaning up ---"
-  echo "Checking for busy mounts under /mnt..."
-  if lsof +f -- /mnt | grep -q "^"; then
-    die "Some files under /mnt are still in use. Cannot unmount safely."
-  fi
-  rm -f /mnt/nemesis-stage2.sh
-  umount -R /mnt
-  echo "=== Install finished at $(date) ==="
-}
-
-# ── Main flow ───────────────────────────────────────
-prepare_disk
-setup_swap
-install_base
-configure_chroot
-cleanup
+grub-mkconfig
