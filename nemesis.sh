@@ -49,10 +49,14 @@ prepare_disk() {
   swapoff -a
   umount -R /mnt 2>/dev/null || true
 
-  # detect disk if not set
+  # detect disk if not set, filtering only TYPE=="disk"
   if [[ -z "$disk" ]]; then
-    disk="/dev/$(lsblk -dn -o NAME | head -n1)"
+    disk=$(lsblk -dno NAME,TYPE \
+      | awk '$2=="disk" { print "/dev/" $1; exit }')
   fi
+
+  [[ -b "$disk" ]] || die "Target disk $disk not found or not a block device!"
+
   echo "Using target disk: $disk"
 
   # GPT + partitions aligned
@@ -74,6 +78,7 @@ prepare_disk() {
   mkdir -p /mnt/boot
   mount "$disk1" /mnt/boot
 }
+
 
 # ── Stage 2: Swapfile ──────────────────────────────────
 setup_swap() {
