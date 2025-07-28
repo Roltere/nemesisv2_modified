@@ -9,8 +9,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ── Defaults & CLI flags ───────────────────────────────
-hostname="main"
-username="main"
+hostname="arch-vm"
+username="user"
 password="Ch4ngeM3!"
 swap_size="4G"
 filesystem="ext4"
@@ -67,10 +67,19 @@ prepare_disk() {
   # Clear any existing partition table
   wipefs -af "$disk"
   
-  parted --script "$disk" mklabel gpt
-  parted --script "$disk" mkpart ESP fat32 1MiB 261MiB
-  parted --script "$disk" set 1 esp on
-  parted --script "$disk" mkpart primary "$filesystem" 261MiB 100%
+  # Check if we're in UEFI or BIOS mode
+  if [[ -d /sys/firmware/efi/efivars ]]; then
+    echo "UEFI mode detected - creating GPT with EFI partition"
+    parted --script "$disk" mklabel gpt
+    parted --script "$disk" mkpart ESP fat32 1MiB 261MiB
+    parted --script "$disk" set 1 esp on
+    parted --script "$disk" mkpart primary "$filesystem" 261MiB 100%
+  else
+    echo "BIOS mode detected - creating MBR with boot partition"
+    parted --script "$disk" mklabel msdos
+    parted --script "$disk" mkpart primary "$filesystem" 1MiB 100%
+    parted --script "$disk" set 1 boot on
+  fi
 
   partprobe "$disk"
   udevadm settle
@@ -85,21 +94,36 @@ prepare_disk() {
     disk2="${disk}2"
   fi
 
-  # Verify partitions exist
-  [[ -b "$disk1" ]] || die "EFI partition $disk1 not found!"
-  [[ -b "$disk2" ]] || die "Root partition $disk2 not found!"
-
-  echo "EFI -> $disk1, root -> $disk2"
-
-  echo "--- Formatting partitions ---"
-  mkfs.fat -F32 "$disk1"
-  mkfs."$filesystem" -F "$disk2"
-
-  echo "--- Mounting filesystems ---"
-  mkdir -p /mnt
-  mount "$disk2" /mnt
-  mkdir -p /mnt/boot
-  mount "$disk1" /mnt/boot
+  # Check boot mode for partition handling
+  if [[ -d /sys/firmware/efi/efivars ]]; then
+    # UEFI mode - we have EFI and root partitions
+    [[ -b "$disk1" ]] || die "EFI partition $disk1 not found!"
+    [[ -b "$disk2" ]] || die "Root partition $disk2 not found!"
+    
+    echo "EFI -> $disk1, root -> $disk2"
+    
+    echo "--- Formatting partitions ---"
+    mkfs.fat -F32 "$disk1"
+    mkfs."$filesystem" -F "$disk2"
+    
+    echo "--- Mounting filesystems ---"
+    mkdir -p /mnt
+    mount "$disk2" /mnt
+    mkdir -p /mnt/boot
+    mount "$disk1" /mnt/boot
+  else
+    # BIOS mode - only root partition
+    [[ -b "$disk1" ]] || die "Root partition $disk1 not found!"
+    
+    echo "Root -> $disk1"
+    
+    echo "--- Formatting partitions ---"
+    mkfs."$filesystem" -F "$disk1"
+    
+    echo "--- Mounting filesystems ---"
+    mkdir -p /mnt
+    mount "$disk1" /mnt
+  fi
 }
 
 # ── Stage 2: Swapfile ─────────────────────────────────
@@ -247,9 +271,30 @@ chage -d 0 "\$username"
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
 echo "--- Installing bootloader ---"
-pacman --noconfirm -S grub efibootmgr
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-grub-mkconfig -o /boot/grub/grub.cfg
+# Check if we're running in UEFI mode
+if [[ -d /sys/firmware/efi/efivars ]]; then
+    echo "UEFI mode detected, installing GRUB for UEFI..."
+    pacman --noconfirm -S grub efibootmgr
+    grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --removable
+    grub-mkconfig -o /boot/grub/grub.cfg
+else
+    echo "BIOS/Legacy mode detected, installing GRUB for BIOS..."
+    pacman --noconfirm -S grub
+    # For BIOS mode, we need to install to the disk, not a partition
+    disk_device=\$(lsblk -no PKNAME "\$(findmnt -n -o SOURCE /)" | head -1)
+    if [[ -z "\$disk_device" ]]; then
+        # Fallback: try to determine from mount point
+        root_device=\$(findmnt -n -o SOURCE /)
+        if [[ "\$root_device" =~ nvme ]]; then
+            disk_device=\${root_device%p*}
+        else
+            disk_device=\${root_device%[0-9]*}
+        fi
+    fi
+    echo "Installing GRUB to \$disk_device"
+    grub-install --target=i386-pc "\$disk_device"
+    grub-mkconfig -o /boot/grub/grub.cfg
+fi
 
 echo "--- Setting up services ---"
 systemctl enable sshd
