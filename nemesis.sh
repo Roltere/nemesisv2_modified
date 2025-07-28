@@ -189,8 +189,26 @@ cat > /etc/hosts <<HOSTS
 127.0.1.1	\$hostname.localdomain	\$hostname
 HOSTS
 
-rm -f /etc/resolv.conf
-ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+# Handle resolv.conf more carefully - it might be busy/mounted
+if [[ -L /etc/resolv.conf ]]; then
+    # It's already a symlink, just remove it
+    rm -f /etc/resolv.conf
+elif [[ -f /etc/resolv.conf ]]; then
+    # It's a regular file, try to remove it, but don't fail if busy
+    rm -f /etc/resolv.conf || {
+        echo "Warning: Could not remove /etc/resolv.conf (busy), trying to overwrite..."
+        # If we can't remove it, try to make it a symlink anyway
+        # This will fail gracefully if the file is truly locked
+        ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || {
+            echo "Warning: Could not create resolv.conf symlink, using existing file"
+        }
+    }
+fi
+
+# Only create symlink if we successfully removed the old file or it doesn't exist
+if [[ ! -e /etc/resolv.conf ]]; then
+    ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+fi
 systemctl enable systemd-resolved NetworkManager
 
 echo "--- Configuring pacman ---"
