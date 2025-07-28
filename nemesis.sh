@@ -9,8 +9,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ── Defaults & CLI flags ───────────────────────────────
-hostname="main"
-username="main"
+hostname="arch-vm"
+username="user"
 password="Ch4ngeM3!"
 swap_size="4G"
 filesystem="ext4"
@@ -24,7 +24,7 @@ Usage: $0 [-n hostname] [-u username] [-P password] [-S swap_size] [-f fs] [-d d
   -P Password (default: $password)
   -S Swapfile size (e.g. 4G; default: $swap_size)
   -f Root FS type (ext4, btrfs; default: $filesystem)
-  -d Target disk (e.g. /dev/sda; auto‑detect if omitted)
+  -d Target disk (e.g. /dev/sda; auto‑detected if omitted)
 EOF
   exit 1
 }
@@ -72,7 +72,7 @@ prepare_disk() {
   partprobe "$disk"
   udevadm settle
 
-  # NVMe‑safe: list the partitions created
+  # NVMe-safe: list the partitions created
   mapfile -t parts < <(lsblk -nr -o NAME,TYPE "$disk" | awk '$2=="part"{print "/dev/"$1}')
   disk1="${parts[0]}" || die "Partition 1 not found!"
   disk2="${parts[1]}" || die "Partition 2 not found!"
@@ -84,8 +84,9 @@ prepare_disk() {
   mkfs."$filesystem" -F "$disk2"
 
   echo "--- Mounting filesystems ---"
-  mkdir -p /mnt /mnt/boot
+  mkdir -p /mnt
   mount "$disk2" /mnt
+  mkdir -p /mnt/boot
   mount "$disk1" /mnt/boot
 }
 
@@ -143,7 +144,7 @@ ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 systemctl enable systemd-resolved NetworkManager
 
 # Mirrors & pacman
-sed -i '/#\\[multilib\\]/,/Include/ s/^#//' /etc/pacman.conf
+sed -i '/#\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
 curl https://blackarch.org/strap.sh | sh
 echo "Server = https://blackarch.org/blackarch/os/x86_64" > /etc/pacman.d/blackarch-mirrorlist
 pacman --noconfirm -Syu
