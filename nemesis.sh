@@ -3,8 +3,8 @@ set -euo pipefail
 trap 'echo "Error on line $LINENO"; exit 1' ERR
 
 # ── Defaults ───────────────────────────────────────────
-hostname="arch-vm"
-username="user"
+hostname="main"
+username="main"
 password="Ch4ngeM3!"
 swap_size="4G"       # swapfile size
 filesystem="ext4"    # root FS
@@ -154,4 +154,35 @@ echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 # ── Bootloader ───────────────────────────────
 pacman --noconfirm -Sy grub efibootmgr
 grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-grub-mkconfig
+grub-mkconfig -o /boot/grub/grub.cfg
+
+# ── VM‑specific services ──────────────────────
+systemctl enable sshd
+systemctl enable vmtoolsd
+systemctl enable vmware-vmblock-fuse
+systemctl enable vgauth.service
+systemctl enable vmhgfs-fuse.service
+
+EOF
+
+  chmod +x /mnt/nemesis-stage2.sh
+  echo "--- Entering chroot and running stage2 ---"
+  arch-chroot /mnt /nemesis-stage2.sh
+}
+
+# ── Stage 5: Cleanup ────────────────────────────────
+cleanup() {
+  echo "--- Cleaning up ---"
+  if ! umount -R /mnt; then
+    echo "Warning: Could not unmount /mnt cleanly. Some resources may still be busy."
+  fi
+  rm -f /mnt/nemesis-stage2.sh
+  echo "=== Install finished at $(date) ==="
+}
+
+# ── Main flow ───────────────────────────────────────
+prepare_disk
+setup_swap
+install_base
+configure_chroot
+cleanup
