@@ -9,8 +9,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ── Defaults & CLI flags ───────────────────────────────
-hostname="arch-vm"
-username="user"
+hostname="main"
+username="main"
 password="Ch4ngeM3!"
 swap_size="4G"
 filesystem="ext4"
