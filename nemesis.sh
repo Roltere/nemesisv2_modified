@@ -2,24 +2,25 @@
 set -euo pipefail
 trap 'echo "Error on line $LINENO"; exit 1' ERR
 
-# ── Defaults ───────────────────────────────────────────
-hostname="main"
-username="main"
-password="Ch4ngeM3!"
-swap_size="4G"       # swapfile size
-filesystem="ext4"    # root FS
-disk=""              # auto-detect if empty
+# ── Must run as root ───────────────────────────────────
+if [[ $EUID -ne 0 ]]; then
+  echo "This installer must be run as root." >&2
+  exit 1
+fi
 
-# ── Usage ──────────────────────────────────────────────
+# ── Defaults & CLI flags ───────────────────────────────
+hostname="main"; username="main"; password="Ch4ngeM3!"
+swap_size="4G"; filesystem="ext4"; disk=""
+
 usage() {
   cat <<EOF
 Usage: $0 [-n hostname] [-u username] [-P password] [-S swap_size] [-f fs] [-d disk]
-  -n  Hostname (default: $hostname)
-  -u  Username (default: $username)
-  -P  User password (default: $password)
-  -S  Swapfile size, e.g. 4G (default: $swap_size)
-  -f  Root filesystem type (ext4, btrfs, etc.; default: $filesystem)
-  -d  Target disk (e.g. /dev/sda; auto-detected if omitted)
+  -n Hostname (default: $hostname)
+  -u Username (default: $username)
+  -P User password (default: $password)
+  -S Swapfile size, e.g. 4G (default: $swap_size)
+  -f Root FS type (ext4, btrfs, etc; default: $filesystem)
+  -d Target disk (e.g. /dev/sda; auto‑detected if omitted)
 EOF
   exit 1
 }
@@ -32,54 +33,54 @@ while getopts "n:u:P:S:f:d:h" opt; do
     S) swap_size="$OPTARG" ;;
     f) filesystem="$OPTARG" ;;
     d) disk="$OPTARG" ;;
-    h|*) usage ;;
+    *) usage ;;
   esac
 done
 
-# ── Logging & Environment Prep ────────────────────────
+# ── Logging & Preflight ───────────────────────────────
 exec > >(tee install.log) 2>&1
-echo "=== Starting Arch-VM install at $(date) ==="
+echo "=== Arch VM install started at $(date) ==="
 
-# load UK keymap and sync time—crucial before any downloads
 loadkeys uk
 timedatectl set-ntp true
 
-# ── Helpers ────────────────────────────────────────────
-die() { echo "$*" >&2; exit 1; }
+die(){ echo "$*" >&2; exit 1; }
 
-# ── Stage 1: Prepare Disk ─────────────────────────────
+# ── Stage 1: Disk prep ────────────────────────────────
 prepare_disk() {
   echo "--- Preparing disk ---"
   swapoff -a
   umount -R /mnt 2>/dev/null || true
 
-  # detect only real disks
+  # detect only real "disk" types
   if [[ -z "$disk" ]]; then
-    disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{ print "/dev/" $1; exit }')
+    disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/"$1; exit}')
   fi
-  [[ -b "$disk" ]] || die "Target disk '$disk' not found or not a block device!"
-  echo "Using target disk: $disk"
+  [[ -b "$disk" ]] || die "Block device $disk not found!"
 
-  # Create GPT and two aligned partitions
+  echo "Using disk: $disk"
   parted --script "$disk" mklabel gpt
   parted --script "$disk" mkpart primary fat32 1MiB 261MiB
   parted --script "$disk" set 1 boot on
   parted --script "$disk" mkpart primary "$filesystem" 261MiB 100%
 
-  disk1="${disk}1"
-  disk2="${disk}2"
+  # ensure kernel sees new partitions
+  partprobe "$disk"
+  udevadm settle
+
+  disk1="${disk}1"; disk2="${disk}2"
 
   echo "--- Formatting partitions ---"
   mkfs.fat -F32 "$disk1"
   mkfs."$filesystem" -F "$disk2"
 
-  echo "--- Mounting root & EFI ---"
+  echo "--- Mounting filesystems ---"
   mkdir -p /mnt /mnt/boot
   mount "$disk2" /mnt
   mount "$disk1" /mnt/boot
 }
 
-# ── Stage 2: Swapfile ──────────────────────────────────
+# ── Stage 2: Swapfile ─────────────────────────────────
 setup_swap() {
   echo "--- Creating ${swap_size} swapfile ---"
   fallocate -l "$swap_size" /mnt/swapfile
@@ -88,7 +89,7 @@ setup_swap() {
   swapon /mnt/swapfile
 }
 
-# ── Stage 3: Install Base System ──────────────────────
+# ── Stage 3: Base install ────────────────────────────
 install_base() {
   echo "--- Ranking mirrors & installing base ---"
   pacman --noconfirm -Sy --needed reflector
@@ -96,30 +97,27 @@ install_base() {
 
   pacstrap /mnt \
     base linux-virtual linux-firmware \
-    sudo base-devel yay networkmanager systemd-resolvconf \
-    openssh git neovim tmux wget p7zip neofetch noto-fonts \
-    ttf-noto-nerd fish less ldns open-vm-tools
+    sudo base-devel yay networkmanager \
+    systemd-resolvconf openssh git neovim tmux \
+    wget p7zip neofetch noto-fonts ttf-noto-nerd \
+    fish less ldns open-vm-tools
 }
 
-# ── Stage 4: Configure in chroot ──────────────────────
+# ── Stage 4: Chroot configuration ────────────────────
 configure_chroot() {
   echo "--- Generating fstab ---"
   genfstab -U /mnt >> /mnt/etc/fstab
-  # now that /mnt/etc exists, add swap entry
   echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
 
-  echo "--- Writing stage2 script into chroot ---"
+  echo "--- Injecting stage2 script ---"
   cat > /mnt/nemesis-stage2.sh <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 trap 'echo "Chroot error on line \$LINENO"; exit 1' ERR
 
-# Variables from host
-hostname="$hostname"
-username="$username"
-password="$password"
+hostname="$hostname"; username="$username"; password="$password"
 
-# ── Locale & Time ─────────────────────────
+# Time & locale
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 hwclock --systohc
 echo "en_GB.UTF-8 UTF-8" > /etc/locale.gen
@@ -127,42 +125,39 @@ locale-gen
 echo LANG=en_GB.UTF-8 > /etc/locale.conf
 echo KEYMAP=uk > /etc/vconsole.conf
 
-# ── Hostname & Networking ───────────────────
+# Hostname & network
 echo "\$hostname" > /etc/hostname
 rm -f /etc/resolv.conf
 ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-systemctl enable systemd-resolved
-systemctl enable NetworkManager
+systemctl enable systemd-resolved NetworkManager
 
-# ── Pacman & BlackArch ───────────────────────
+# Mirrors & pacman
 sed -i '/#\\[multilib\\]/,/Include/ s/^#//' /etc/pacman.conf
 curl https://blackarch.org/strap.sh | sh
-echo "Server = https://blackarch.org/blackarch/os/x86_64" > /etc/pacman.d/blackarch-mirrorlist
+echo "Server = https://blackarch.org/blackarch/os/x86_64" \
+  > /etc/pacman.d/blackarch-mirrorlist
 pacman --noconfirm -Syu
 
-# ── Initramfs (zstd + minimal hooks) ──────────
+# Initramfs: zstd + minimal hooks
 sed -i 's/^COMPRESSION=.*/COMPRESSION="zstd"/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems keyboard keymap consolefont fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
-# ── Users & SSH ──────────────────────────────
+# Users & SSH
 useradd -m -G wheel "\$username"
 echo -e "\$password\n\$password" | passwd "\$username"
-chage -d 0 "\$username"       # force password change on first login
+chage -d 0 "\$username"
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
-# ── Bootloader ───────────────────────────────
+# Bootloader
 pacman --noconfirm -Sy grub efibootmgr
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+grub-install --target=x86_64-efi --efi-directory=/boot \
+  --bootloader-id=GRUB
 grub-mkconfig -o /boot/grub/grub.cfg
 
-# ── VM‑specific services ──────────────────────
-systemctl enable sshd
-systemctl enable vmtoolsd
-systemctl enable vmware-vmblock-fuse
-systemctl enable vgauth.service
-systemctl enable vmhgfs-fuse.service
-
+# VM tools & shared folders
+systemctl enable sshd vmtoolsd \
+  vmware-vmblock-fuse vgauth.service vmhgfs-fuse.service
 EOF
 
   chmod +x /mnt/nemesis-stage2.sh
@@ -170,17 +165,18 @@ EOF
   arch-chroot /mnt /nemesis-stage2.sh
 }
 
-# ── Stage 5: Cleanup ────────────────────────────────
+# ── Stage 5: Cleanup ─────────────────────────────────
 cleanup() {
-  echo "--- Cleaning up ---"
+  echo "--- Final sync & unmount ---"
+  sync
   if ! umount -R /mnt; then
-    echo "Warning: Could not unmount /mnt cleanly. Some resources may still be busy."
+    echo "Warning: some mounts under /mnt remained busy." >&2
   fi
   rm -f /mnt/nemesis-stage2.sh
-  echo "=== Install finished at $(date) ==="
+  echo "=== Install complete at $(date) ==="
 }
 
-# ── Main flow ───────────────────────────────────────
+# ── Main ─────────────────────────────────────────────
 prepare_disk
 setup_swap
 install_base
