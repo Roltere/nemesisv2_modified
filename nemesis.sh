@@ -43,7 +43,6 @@ done
 
 # ── Logging & Prep ────────────────────────────────────
 exec > >(tee install.log) 2>&1
-
 echo "=== Arch-VM install started: $(date) ==="
 
 loadkeys uk
@@ -58,7 +57,7 @@ prepare_disk() {
   umount -R /mnt 2>/dev/null || true
 
   if [[ -z "$disk" ]]; then
-    disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/"$1; exit}')
+    disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/" $1; exit}')
   fi
   [[ -b "$disk" ]] || die "Block device '$disk' not found!"
   echo "Using disk: $disk"
@@ -115,18 +114,20 @@ setup_swap() {
 # ── Stage 3: Base install ────────────────────────────
 install_base() {
   echo "--- Enabling community & multilib repos ---"
-  sed -i 's@^[[:space:]]*#\(\s*\)\[community\]@\1[community]@' /etc/pacman.conf
-  sed -i 's@^[[:space:]]*#\(\s*\)Include = /etc/pacman.d/community-mirrorlist@Include = /etc/pacman.d/community-mirrorlist@' /etc/pacman.conf
-  sed -i 's@^[[:space:]]*#\(\s*\)\[multilib\]@\1[multilib]@' /etc/pacman.conf
-  sed -i 's@^[[:space:]]*#\(\s*\)Include = /etc/pacman.d/multilib-mirrorlist@Include = /etc/pacman.d/multilib-mirrorlist@' /etc/pacman.conf
+  sed -i '/^#\[community\]$/s/^#//' /etc/pacman.conf
+  sed -i '/^#Include = \/etc\/pacman.d\/community-mirrorlist$/s/^#//' /etc/pacman.conf
+  sed -i '/^#\[multilib\]$/s/^#//' /etc/pacman.conf
+  sed -i '/^#Include = \/etc\/pacman.d\/multilib-mirrorlist$/s/^#//' /etc/pacman.conf
 
+  echo "--- Syncing package databases ---"
   pacman --noconfirm -Sy || die "Failed to sync pacman databases"
 
   echo "--- Ranking mirrors (if reflector installed) ---"
   if pacman --noconfirm -S --needed reflector; then
     timeout 120 reflector --protocol https --latest 20 \
       --sort rate --connection-timeout 10 \
-      --download-timeout 30 --save /etc/pacman.d/mirrorlist || echo "Warning: reflector failed"
+      --download-timeout 30 --save /etc/pacman.d/mirrorlist \
+      || echo "Warning: reflector failed"
   fi
 
   echo "--- Installing base system packages ---"
@@ -193,20 +194,20 @@ systemctl enable systemd-resolved NetworkManager
 systemctl start systemd-resolved NetworkManager
 
 sed -i '/#\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
-
 pacman --noconfirm -Syu
 
+echo "--- Initramfs build ---"
 sed -i 's/^COMPRESSION=.*/COMPRESSION="zstd"/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems keyboard keymap consolefont fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
+echo "--- User setup ---"
 useradd -m -G wheel -s /usr/bin/fish "\$username"
-echo -e "\$password
-\$password" | passwd "\$username"
+echo -e "\$password\n\$password" | passwd "\$username"
 chage -d 0 "\$username"
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
-echo "Installing GRUB..."
+echo "--- Installing GRUB... ---"
 if [[ -d /sys/firmware/efi/efivars ]]; then
   pacman --noconfirm -S grub efibootmgr
   grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --removable
@@ -227,7 +228,7 @@ echo "--- Enable core services ---"
 systemctl enable NetworkManager.service
 systemctl enable systemd-resolved.service
 systemctl enable sshd.service
-docker enable
+systemctl enable docker.service
 systemctl enable smartd.service
 systemctl enable gdm.service
 
@@ -236,7 +237,7 @@ su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.term
 su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.terminal exec-arg '-x'"
 
 echo "--- Installing AUR helper (yay) as user ---"
-runuser -u "\$username" -- bash -lc \"cd /home/\$username && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg --noconfirm -si && cd .. && rm -rf yay\"
+runuser -u "\$username" -- bash -lc "cd /home/\$username && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg --noconfirm -si && cd .. && rm -rf yay"
 
 echo "Stage 2 completed successfully"
 EOF
