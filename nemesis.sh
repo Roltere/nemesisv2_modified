@@ -43,6 +43,7 @@ done
 
 # ── Logging & Prep ────────────────────────────────────
 exec > >(tee install.log) 2>&1
+
 echo "=== Arch-VM install started: $(date) ==="
 
 loadkeys uk
@@ -57,7 +58,7 @@ prepare_disk() {
   umount -R /mnt 2>/dev/null || true
 
   if [[ -z "$disk" ]]; then
-    disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/" $1; exit}')
+    disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/"$1; exit}')
   fi
   [[ -b "$disk" ]] || die "Block device '$disk' not found!"
   echo "Using disk: $disk"
@@ -113,22 +114,19 @@ setup_swap() {
 
 # ── Stage 3: Base install ────────────────────────────
 install_base() {
-  echo "--- Setting up mirrors & enabling repos ---"
-  # Ensure community & multilib are enabled
-  sed -i 's@^[[:space:]]*#\s*\[community\]@[community]@' /etc/pacman.conf
-  sed -i 's@^[[:space:]]*#\s*Include = /etc/pacman.d/community-mirrorlist@Include = /etc/pacman.d/community-mirrorlist@' /etc/pacman.conf
-  sed -i 's@^[[:space:]]*#\s*\[multilib\]@[multilib]@' /etc/pacman.conf
-  sed -i 's@^[[:space:]]*#\s*Include = /etc/pacman.d/multilib-mirrorlist@Include = /etc/pacman.d/multilib-mirrorlist@' /etc/pacman.conf
+  echo "--- Enabling community & multilib repos ---"
+  sed -i 's@^[[:space:]]*#\(\s*\)\[community\]@\1[community]@' /etc/pacman.conf
+  sed -i 's@^[[:space:]]*#\(\s*\)Include = /etc/pacman.d/community-mirrorlist@Include = /etc/pacman.d/community-mirrorlist@' /etc/pacman.conf
+  sed -i 's@^[[:space:]]*#\(\s*\)\[multilib\]@\1[multilib]@' /etc/pacman.conf
+  sed -i 's@^[[:space:]]*#\(\s*\)Include = /etc/pacman.d/multilib-mirrorlist@Include = /etc/pacman.d/multilib-mirrorlist@' /etc/pacman.conf
 
   pacman --noconfirm -Sy || die "Failed to sync pacman databases"
 
-  # Rank mirrors if reflector available
+  echo "--- Ranking mirrors (if reflector installed) ---"
   if pacman --noconfirm -S --needed reflector; then
-    echo "Ranking mirrors..."
     timeout 120 reflector --protocol https --latest 20 \
       --sort rate --connection-timeout 10 \
-      --download-timeout 30 --save /etc/pacman.d/mirrorlist \
-      || echo "Warning: reflector failed"
+      --download-timeout 30 --save /etc/pacman.d/mirrorlist || echo "Warning: reflector failed"
   fi
 
   echo "--- Installing base system packages ---"
@@ -164,13 +162,12 @@ configure_chroot() {
   genfstab -U /mnt >> /mnt/etc/fstab
   echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
 
-  echo "--- Writing stage2 script ---"
   cat > /mnt/nemesis-stage2.sh <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 trap 'echo "Error on line \$LINENO"; exit 1' ERR
 
-# Ensure DNS
+# DNS
 cp /etc/resolv.conf /etc/resolv.conf
 
 # Variables
@@ -178,43 +175,37 @@ hostname="main"
 username="main"
 password="$password"
 
-# Time & locale
+echo "--- Time & locale setup ---"
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 hwclock --systohc
 echo "en_GB.UTF-8 UTF-8" > /etc/locale.gen
 locale-gen
 echo LANG=en_GB.UTF-8 > /etc/locale.conf
 
-# Hostname & network
+echo "--- Hostname & network setup ---"
 echo "\$hostname" > /etc/hostname
 cat > /etc/hosts <<HOSTS
 127.0.0.1   localhost
 ::1         localhost
 127.0.1.1   \$hostname.localdomain \$hostname
 HOSTS
-
-# Enable networking early
 systemctl enable systemd-resolved NetworkManager
 systemctl start systemd-resolved NetworkManager
 
-# Pacman config
 sed -i '/#\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
 
-# Upgrade system
 pacman --noconfirm -Syu
 
-# Initramfs
 sed -i 's/^COMPRESSION=.*/COMPRESSION="zstd"/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems keyboard keymap consolefont fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
-# Users
 useradd -m -G wheel -s /usr/bin/fish "\$username"
-echo -e "\$password\n\$password" | passwd "\$username"
+echo -e "\$password
+\$password" | passwd "\$username"
 chage -d 0 "\$username"
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
-# Bootloader
 echo "Installing GRUB..."
 if [[ -d /sys/firmware/efi/efivars ]]; then
   pacman --noconfirm -S grub efibootmgr
@@ -226,27 +217,26 @@ else
   grub-mkconfig -o /boot/grub/grub.cfg
 fi
 
-# Catppuccin GNOME Shell theme
+echo "--- Catppuccin GNOME Shell theme ---"
 pacman --noconfirm -S gtk-engine-murrine gnome-themes-extra gnome-shell-extension-user-theme
 git clone https://github.com/Fausto-Korpsvart/Catppuccin-GTK-Theme.git /usr/share/themes/Catppuccin
 su -l "\$username" -c "gsettings set org.gnome.desktop.interface gtk-theme 'Catppuccin'"
 su -l "\$username" -c "gsettings set org.gnome.shell.extensions.user-theme name 'Catppuccin'"
 
-# Enable core services
+echo "--- Enable core services ---"
 systemctl enable NetworkManager.service
 systemctl enable systemd-resolved.service
 systemctl enable sshd.service
-systemctl enable docker.service
+docker enable
 systemctl enable smartd.service
 systemctl enable gdm.service
 
-# Set default terminal to Terminator
+echo "--- Set default terminal to Terminator ---"
 su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.terminal exec 'terminator'"
 su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.terminal exec-arg '-x'"
 
-# AUR helper (yay) as user
-echo "--- Installing yay as \$username ---"
-runuser -u "\$username" -- bash -lc "cd /home/\$username && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg --noconfirm -si && cd .. && rm -rf yay"
+echo "--- Installing AUR helper (yay) as user ---"
+runuser -u "\$username" -- bash -lc \"cd /home/\$username && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg --noconfirm -si && cd .. && rm -rf yay\"
 
 echo "Stage 2 completed successfully"
 EOF
