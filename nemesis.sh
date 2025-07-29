@@ -56,26 +56,22 @@ prepare_disk() {
   swapoff -a 2>/dev/null || true
   umount -R /mnt 2>/dev/null || true
 
-  # detect only TYPE=="disk"
   if [[ -z "$disk" ]]; then
     disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/"$1; exit}')
   fi
   [[ -b "$disk" ]] || die "Block device '$disk' not found!"
-
   echo "Using disk: $disk"
 
-  # Clear any existing partition table
   wipefs -af "$disk"
-  
-  # Check if we're in UEFI or BIOS mode
+
   if [[ -d /sys/firmware/efi/efivars ]]; then
-    echo "UEFI mode detected - creating GPT with EFI partition"
+    echo "UEFI mode detected"
     parted --script "$disk" mklabel gpt
     parted --script "$disk" mkpart ESP fat32 1MiB 261MiB
     parted --script "$disk" set 1 esp on
     parted --script "$disk" mkpart primary "$filesystem" 261MiB 100%
   else
-    echo "BIOS mode detected - creating MBR with boot partition"
+    echo "BIOS mode detected"
     parted --script "$disk" mklabel msdos
     parted --script "$disk" mkpart primary "$filesystem" 1MiB 100%
     parted --script "$disk" set 1 boot on
@@ -85,7 +81,6 @@ prepare_disk() {
   udevadm settle
   sleep 2
 
-  # More robust partition detection
   if [[ "$disk" =~ nvme ]]; then
     disk1="${disk}p1"
     disk2="${disk}p2"
@@ -94,34 +89,16 @@ prepare_disk() {
     disk2="${disk}2"
   fi
 
-  # Check boot mode for partition handling
+  echo "EFI -> $disk1, root -> $disk2"
+  mkdir -p /mnt /mnt/boot
+  echo "--- Formatting partitions ---"
   if [[ -d /sys/firmware/efi/efivars ]]; then
-    # UEFI mode - we have EFI and root partitions
-    [[ -b "$disk1" ]] || die "EFI partition $disk1 not found!"
-    [[ -b "$disk2" ]] || die "Root partition $disk2 not found!"
-    
-    echo "EFI -> $disk1, root -> $disk2"
-    
-    echo "--- Formatting partitions ---"
     mkfs.fat -F32 "$disk1"
     mkfs."$filesystem" -F "$disk2"
-    
-    echo "--- Mounting filesystems ---"
-    mkdir -p /mnt
     mount "$disk2" /mnt
-    mkdir -p /mnt/boot
     mount "$disk1" /mnt/boot
   else
-    # BIOS mode - only root partition
-    [[ -b "$disk1" ]] || die "Root partition $disk1 not found!"
-    
-    echo "Root -> $disk1"
-    
-    echo "--- Formatting partitions ---"
     mkfs."$filesystem" -F "$disk1"
-    
-    echo "--- Mounting filesystems ---"
-    mkdir -p /mnt
     mount "$disk1" /mnt
   fi
 }
@@ -138,45 +115,29 @@ setup_swap() {
 # ── Stage 3: Base install ────────────────────────────
 install_base() {
   echo "--- Setting up mirrors ---"
-  
-  # Update pacman databases first
   pacman --noconfirm -Sy || die "Failed to sync pacman databases"
-  
-  # Install reflector with better error handling
-  if ! pacman --noconfirm -S --needed reflector; then
-    echo "Warning: Could not install reflector, using default mirrors"
+  if pacman --noconfirm -S --needed reflector; then
+    echo "Ranking mirrors..."
+    timeout 120 reflector --protocol https --latest 20 \
+      --sort rate --connection-timeout 10 \
+      --download-timeout 30 --save /etc/pacman.d/mirrorlist || 
+      echo "Warning: reflector failed"
   else
-    echo "Ranking mirrors (this may take a while)..."
-    # Use more conservative settings for reflector
-    if ! timeout 120 reflector \
-         --verbose \
-         --protocol https \
-         --latest 20 \
-         --sort rate \
-         --connection-timeout 10 \
-         --download-timeout 30 \
-         --save /etc/pacman.d/mirrorlist; then
-      echo "Warning: reflector failed, using existing mirrorlist"
-    fi
+    echo "Warning: reflector not installed"
   fi
 
-  echo "--- Installing base system ---"
-  # Retry pacstrap up to 3 times with cleaned package list
+  echo "--- Installing base system (with go) ---"
+  local pkgs=(base linux linux-firmware sudo base-devel go 
+    networkmanager systemd-resolvconf openssh git neovim tmux 
+    wget p7zip noto-fonts ttf-noto-nerd fish less ldns)
   local retries=3
   for i in $(seq 1 $retries); do
-    if pacstrap /mnt \
-      base linux linux-firmware \
-      sudo base-devel networkmanager \
-      systemd-resolvconf openssh git neovim tmux \
-      wget p7zip noto-fonts ttf-noto-nerd \
-      fish less ldns; then
+    if pacstrap -K /mnt "${pkgs[@]}"; then
       break
     else
-      echo "pacstrap failed on attempt $i/$retries"
+      echo "pacstrap failed attempt $i"
       sleep 10
-      if [ "$i" -eq "$retries" ]; then 
-        die "pacstrap failed after $retries attempts"
-      fi
+      [[ $i -eq $retries ]] && die "pacstrap failed after $retries attempts"
     fi
   done
 }
@@ -191,174 +152,80 @@ configure_chroot() {
   cat > /mnt/nemesis-stage2.sh <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-trap 'echo "Chroot error on line \$LINENO"; exit 1' ERR
+trap 'echo "Error on line \$LINENO"; exit 1' ERR
 
+# Ensure environment
+export MAKEPKG_ALLOW_ROOT=1
+
+# Variables
 hostname="$hostname"
 username="$username"
 password="$password"
-disk="$disk"
 
-echo "--- Setting up time and locale ---"
+# Time & locale
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 hwclock --systohc
 echo "en_GB.UTF-8 UTF-8" > /etc/locale.gen
 locale-gen
 echo LANG=en_GB.UTF-8 > /etc/locale.conf
-echo KEYMAP=uk > /etc/vconsole.conf
 
-echo "--- Setting up hostname and network ---"
+# Hostname & network
 echo "\$hostname" > /etc/hostname
 cat > /etc/hosts <<HOSTS
-127.0.0.1	localhost
-::1		localhost
-127.0.1.1	\$hostname.localdomain	\$hostname
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   \$hostname.localdomain \$hostname
 HOSTS
-
-# Handle resolv.conf more carefully - it might be busy/mounted
-if [[ -L /etc/resolv.conf ]]; then
-    # It's already a symlink, just remove it
-    rm -f /etc/resolv.conf
-elif [[ -f /etc/resolv.conf ]]; then
-    # It's a regular file, try to remove it, but don't fail if busy
-    rm -f /etc/resolv.conf || {
-        echo "Warning: Could not remove /etc/resolv.conf (busy), trying to overwrite..."
-        # If we can't remove it, try to make it a symlink anyway
-        # This will fail gracefully if the file is truly locked
-        ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || {
-            echo "Warning: Could not create resolv.conf symlink, using existing file"
-        }
-    }
-fi
-
-# Only create symlink if we successfully removed the old file or it doesn't exist
-if [[ ! -e /etc/resolv.conf ]]; then
-    ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-fi
+rm -f /etc/resolv.conf
+ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 systemctl enable systemd-resolved NetworkManager
 
-echo "--- Configuring pacman ---"
+# Config pacman
 sed -i '/#\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
 
-echo "--- Setting up BlackArch repository ---"
-# Check network connectivity before trying BlackArch
-if ping -c 1 blackarch.org >/dev/null 2>&1; then
-    # Download BlackArch bootstrap script
-    curl -O https://blackarch.org/strap.sh
-    if [[ -f strap.sh ]]; then
-        # Note: Checksum verification skipped as it changes frequently
-        # Verify it's a reasonable size (not empty/error page)
-        if [[ \$(wc -c < strap.sh) -gt 1000 ]]; then
-            chmod +x strap.sh && ./strap.sh
-            rm -f strap.sh
-            echo "BlackArch repository added successfully"
-        else
-            echo "Warning: BlackArch strap.sh appears invalid, skipping BlackArch setup"
-            rm -f strap.sh
-        fi
-    else
-        echo "Warning: Failed to download BlackArch strap.sh"
-    fi
-else
-    echo "Warning: No network connectivity, skipping BlackArch setup"
+# BlackArch
+if ping -c1 blackarch.org &>/dev/null; then
+  curl -O https://blackarch.org/strap.sh
+  if [[ -s strap.sh ]]; then chmod +x strap.sh&&./strap.sh; fi
 fi
 
 # Update system
-pacman --noconfirm -Syu || echo "Warning: System update failed"
+pacman --noconfirm -Syu
 
-echo "--- Setting up initramfs ---"
+# Initramfs
 sed -i 's/^COMPRESSION=.*/COMPRESSION="zstd"/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems keyboard keymap consolefont fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
-echo "--- Setting up users ---"
+# Users
 useradd -m -G wheel -s /usr/bin/fish "\$username"
-echo -e "\$password\n\$password" | passwd "\$username"
+echo -e "\$password
+\$password"|passwd "\$username"
 chage -d 0 "\$username"
-echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
+echo "%wheel ALL=(ALL) ALL">>/etc/sudoers
 
-echo "--- Installing bootloader ---"
-# Check if we're running in UEFI mode
+# Bootloader
+echo "Installing GRUB..."
 if [[ -d /sys/firmware/efi/efivars ]]; then
-    echo "UEFI mode detected, installing GRUB for UEFI..."
-    pacman --noconfirm -S grub efibootmgr
-    grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --removable
-    grub-mkconfig -o /boot/grub/grub.cfg
+  pacman --noconfirm -S grub efibootmgr
+  grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --removable
+  grub-mkconfig -o /boot/grub/grub.cfg
 else
-    echo "BIOS/Legacy mode detected, installing GRUB for BIOS..."
-    pacman --noconfirm -S grub
-    
-    echo "Installing GRUB to \$disk"
-    grub-install --target=i386-pc "\$disk"
-    grub-mkconfig -o /boot/grub/grub.cfg
+  pacman --noconfirm -S grub
+  grub-install --target=i386-pc "$disk"
+  grub-mkconfig -o /boot/grub/grub.cfg
 fi
 
-echo "--- Setting up services ---"
+# Services
 systemctl enable sshd
-
-# Only enable VMware tools if we're in a VMware environment
-if lspci | grep -i vmware >/dev/null 2>&1 || dmesg | grep -i vmware >/dev/null 2>&1; then
-    echo "VMware environment detected, installing VMware tools..."
-    if pacman --noconfirm -S open-vm-tools; then
-        # Enable core VMware services that should always exist
-        systemctl enable vmtoolsd
-        
-        # Enable optional services only if they exist
-        if systemctl list-unit-files vmware-vmblock-fuse.service >/dev/null 2>&1; then
-            systemctl enable vmware-vmblock-fuse
-        else
-            echo "Note: vmware-vmblock-fuse service not available"
-        fi
-        
-        if systemctl list-unit-files vgauth.service >/dev/null 2>&1; then
-            systemctl enable vgauth.service
-        else
-            echo "Note: vgauth service not available"
-        fi
-        
-        if systemctl list-unit-files vmhgfs-fuse.service >/dev/null 2>&1; then
-            systemctl enable vmhgfs-fuse.service
-        else
-            echo "Note: vmhgfs-fuse service not available"
-        fi
-        
-        echo "VMware tools configured successfully"
-    else
-        echo "Warning: Failed to install VMware tools"
-    fi
-else
-    echo "Not running in VMware, skipping VMware tools"
+if lspci|grep -iq vmware;then
+  pacman --noconfirm -S open-vm-tools
+  systemctl enable vmtoolsd vmware-vmblock-fuse vgauth.service vmhgfs-fuse.service
 fi
 
-echo "--- Installing AUR helper (yay) ---"
-# Install yay as the user, not root
-sudo -u "\$username" bash <<EOYAY
-set -euo pipefail
-cd /home/\$username
-
-# Clone yay with error handling
-if git clone https://aur.archlinux.org/yay.git; then
-    cd yay
-    # Build and install yay
-    if makepkg -si --noconfirm; then
-        cd ..
-        rm -rf yay
-        echo "yay installed successfully"
-        
-        # Install neofetch from AUR
-        if yay --noconfirm -S neofetch; then
-            echo "neofetch installed successfully"
-        else
-            echo "Warning: Failed to install neofetch"
-        fi
-    else
-        echo "Warning: Failed to build yay"
-        cd ..
-        rm -rf yay
-    fi
-else
-    echo "Warning: Failed to clone yay repository"
-fi
-EOYAY
+# AUR helper (yay) as user
+echo "--- Installing yay as \$username ---"
+runuser -u "\$username" -- bash -lc "cd /home/\$username && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg --noconfirm -si && cd .. && rm -rf yay"
 
 echo "Stage 2 completed successfully"
 EOF
@@ -366,24 +233,15 @@ EOF
   chmod +x /mnt/nemesis-stage2.sh
   echo "--- Entering chroot & running stage2 ---"
   arch-chroot /mnt /nemesis-stage2.sh
-  
-  # Clean up the stage2 script before unmounting
-  rm -f /mnt/nemesis-stage2.sh
 }
 
 # ── Stage 5: Cleanup ─────────────────────────────────
 cleanup() {
   echo "--- Final sync & unmount ---"
   sync
-  swapoff /mnt/swapfile 2>/dev/null || true
+  swapoff /mnt/swapfile &>/dev/null || true
   umount -R /mnt || echo "Warning: /mnt still busy"
   echo "=== Install finished: $(date) ==="
-  echo ""
-  echo "Installation complete! You can now:"
-  echo "1. Remove the installation media"
-  echo "2. Reboot the system"
-  echo "3. Login with username: $username"
-  echo "4. Change the default password on first login"
 }
 
 # ── Main ─────────────────────────────────────────────
