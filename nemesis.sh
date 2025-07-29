@@ -151,7 +151,7 @@ trap 'echo "Error on line $LINENO"; exit 1' ERR
 # Time & locale
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 hwclock --systohc
-systemctl enable --now systemd-timesyncd.service
+systemctl enable systemd-timesyncd.service
 echo -e "C.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\nen_GB.UTF-8 UTF-8" > /etc/locale.gen
 locale-gen
 echo LANG=en_GB.UTF-8 > /etc/locale.conf
