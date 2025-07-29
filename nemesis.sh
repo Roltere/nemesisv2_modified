@@ -9,8 +9,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ── Defaults & CLI flags ───────────────────────────────
-hostname="main"
-username="main"
+hostname="arch-vm"
+username="user"
 password="Ch4ngeM3!"
 swap_size="4G"
 filesystem="ext4"
@@ -119,20 +119,19 @@ install_base() {
     echo "Ranking mirrors..."
     timeout 120 reflector --protocol https --latest 20 \
       --sort rate --connection-timeout 10 \
-      --download-timeout 30 --save /etc/pacman.d/mirrorlist || \
-      echo "Warning: reflector failed"
+      --download-timeout 30 --save /etc/pacman.d/mirrorlist || echo "Warning: reflector failed"
   else
     echo "Warning: reflector not installed"
   fi
 
   echo "--- Installing base system ---"
-  local pkgs=(base linux linux-firmware sudo base-devel go dhclient
-    networkmanager systemd-resolvconf openssh git neovim tmux
-    wget p7zip noto-fonts ttf-noto-nerd fish less ldns bash-completion
-    man-pages man-db pacman-contrib linux-headers intel-ucode dosfstools
-    exfat-utils ntfs-3g smartmontools hdparm nmap net-tools curl httpie rsync
-    cmake make gcc clang python python-pip nodejs npm docker docker-compose
-    htop atop iotop dstat pavucontrol vlc ffmpeg gimp)
+  local pkgs=(base linux linux-firmware sudo base-devel go dhclient \
+    networkmanager systemd-resolvconf openssh git neovim tmux \
+    wget p7zip noto-fonts ttf-noto-nerd fish less ldns bash-completion \
+    man-pages man-db pacman-contrib linux-headers intel-ucode dosfstools \
+    exfat-utils ntfs-3g smartmontools hdparm nmap net-tools curl httpie rsync \
+    cmake make gcc clang python python-pip nodejs npm docker docker-compose \
+    htop atop iotop dstat pavucontrol vlc ffmpeg gimp kitty terminator)
   local retries=3
   for i in $(seq 1 $retries); do
     if pacstrap -K /mnt "${pkgs[@]}"; then
@@ -200,7 +199,8 @@ mkinitcpio -P
 
 # Users
 useradd -m -G wheel -s /usr/bin/fish "\$username"
-echo -e "\$password\n\$password" | passwd "\$username"
+echo -e "\$password
+\$password" | passwd "\$username"
 chage -d 0 "\$username"
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
@@ -216,6 +216,12 @@ else
   grub-mkconfig -o /boot/grub/grub.cfg
 fi
 
+# Catppuccin GNOME Shell theme
+pacman --noconfirm -S gtk-engine-murrine gnome-themes-extra gnome-shell-extension-user-theme
+git clone https://github.com/Fausto-Korpsvart/Catppuccin-GTK-Theme.git /usr/share/themes/Catppuccin
+su -l "\$username" -c "gsettings set org.gnome.desktop.interface gtk-theme 'Catppuccin'"
+su -l "\$username" -c "gsettings set org.gnome.shell.extensions.user-theme name 'Catppuccin'"
+
 # Enable core services
 systemctl enable NetworkManager.service
 systemctl enable systemd-resolved.service
@@ -223,6 +229,10 @@ systemctl enable sshd.service
 systemctl enable docker.service
 systemctl enable smartd.service
 systemctl enable gdm.service
+
+# Set default terminal to Terminator
+su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.terminal exec 'terminator'"
+su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.terminal exec-arg '-x'"
 
 # AUR helper (yay) as user
 echo "--- Installing yay as \$username ---"
