@@ -114,6 +114,9 @@ setup_swap() {
 # ── Stage 3: Base install ────────────────────────────
 install_base() {
   echo "--- Setting up mirrors ---"
+  # Ensure community & multilib repos are enabled
+  sed -i '/^\[community\]/,/^Include/ s/^#//' /etc/pacman.conf
+  sed -i '/^\[multilib\]/,/^Include/ s/^#//' /etc/pacman.conf
   pacman --noconfirm -Sy || die "Failed to sync pacman databases"
   if pacman --noconfirm -S --needed reflector; then
     echo "Ranking mirrors..."
@@ -125,13 +128,14 @@ install_base() {
   fi
 
   echo "--- Installing base system ---"
-  local pkgs=(base linux linux-firmware sudo base-devel go dhclient \
-    networkmanager systemd-resolvconf openssh git neovim tmux \
-    wget p7zip noto-fonts ttf-noto-nerd fish less ldns bash-completion \
-    man-pages man-db pacman-contrib linux-headers intel-ucode dosfstools \
-    exfat-utils ntfs-3g smartmontools hdparm nmap net-tools curl httpie rsync \
-    cmake make gcc clang python python-pip nodejs npm docker docker-compose \
-    htop atop iotop dstat pavucontrol vlc ffmpeg gimp kitty terminator)
+  local pkgs=(base linux linux-firmware sudo base-devel go dhcpcd
+  networkmanager systemd-resolvconf openssh git neovim tmux
+  wget p7zip noto-fonts fish less ldns bash-completion
+  man-pages man-db pacman-contrib linux-headers intel-ucode
+  dosfstools exfat-utils ntfs-3g smartmontools hdparm
+  nmap net-tools curl httpie rsync cmake make gcc clang
+  python python-pip nodejs npm docker docker-compose
+  htop atop iotop dstat pavucontrol vlc ffmpeg gimp kitty terminator)
   local retries=3
   for i in $(seq 1 $retries); do
     if pacstrap -K /mnt "${pkgs[@]}"; then
