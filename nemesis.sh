@@ -2,13 +2,13 @@
 set -euo pipefail
 trap 'echo "Error on line $LINENO"; exit 1' ERR
 
-# ── Ensure root ───────────────────────────────────────
+# ── Ensure root ─────────────────────────────
 if [[ $EUID -ne 0 ]]; then
   echo "This installer must be run as root." >&2
   exit 1
 fi
 
-# ── Defaults & CLI flags ───────────────────────────────
+# ── Defaults & CLI flags ────────────────────
 hostname="pentest-vm"
 username="pentester"
 password="Ch4ngeM3!"
@@ -41,7 +41,6 @@ while getopts "n:u:P:S:f:d:h" opt; do
   esac
 done
 
-# ── Logging & Prep ────────────────────────────────────
 exec > >(tee install.log) 2>&1
 echo "=== Arch Pentest VM install started: $(date) ==="
 
@@ -49,7 +48,7 @@ loadkeys uk
 timedatectl set-ntp true
 die() { echo "$*" >&2; exit 1; }
 
-# ── Stage 1: Disk prep ────────────────────────────────
+# ── Stage 1: Disk prep ──────────────────────
 prepare_disk() {
   echo "--- Preparing disk ---"
   swapoff -a 2>/dev/null || true
@@ -62,8 +61,6 @@ prepare_disk() {
   echo "Using disk: $disk"
 
   wipefs -af "$disk"
-  
-  # Check boot mode and partition accordingly
   if [[ -d /sys/firmware/efi/efivars ]]; then
     echo "UEFI mode detected - creating GPT with EFI partition"
     parted --script "$disk" mklabel gpt
@@ -81,49 +78,34 @@ prepare_disk() {
   udevadm settle
   sleep 2
 
-  # Robust partition detection
   if [[ "$disk" =~ nvme ]]; then
-    disk1="${disk}p1"
-    disk2="${disk}p2"
+    disk1="${disk}p1"; disk2="${disk}p2"
   else
-    disk1="${disk}1"
-    disk2="${disk}2"
+    disk1="${disk}1"; disk2="${disk}2"
   fi
 
   mkdir -p /mnt /mnt/boot
-  
   if [[ -d /sys/firmware/efi/efivars ]]; then
-    # UEFI mode - EFI and root partitions
     [[ -b "$disk1" ]] || die "EFI partition $disk1 not found!"
     [[ -b "$disk2" ]] || die "Root partition $disk2 not found!"
-    
-    echo "EFI -> $disk1, root -> $disk2"
     mkfs.fat -F32 "$disk1"
     mkfs."$filesystem" -F "$disk2"
     mount "$disk2" /mnt
     mount "$disk1" /mnt/boot
   else
-    # BIOS mode - single root partition
     [[ -b "$disk1" ]] || die "Root partition $disk1 not found!"
-    
-    echo "Root -> $disk1"
     mkfs."$filesystem" -F "$disk1"
     mount "$disk1" /mnt
   fi
 }
 
-# ── Stage 2: Base install ────────────────────────────
+# ── Stage 2: Base install ───────────────────
 install_base() {
   echo "--- Setting up mirrors ---"
-  
-  # Update pacman databases first
   pacman --noconfirm -Sy || die "Failed to sync pacman databases"
-  
-  # Install reflector with better error handling
   if ! pacman --noconfirm -S --needed reflector; then
     echo "Warning: Could not install reflector, using default mirrors"
   else
-    echo "Ranking mirrors (this may take a while)..."
     if ! timeout 120 reflector \
          --verbose \
          --protocol https \
@@ -137,8 +119,6 @@ install_base() {
   fi
 
   echo "--- Installing base system ---"
-  
-  # Core base packages - verified to exist in Arch repos
   local base_pkgs=(
     base linux linux-firmware sudo base-devel
     networkmanager systemd-resolvconf openssh git
@@ -148,15 +128,12 @@ install_base() {
     smartmontools hdparm curl rsync cmake make gcc clang
     python python-pip nodejs npm htop
   )
-  
-  # Detect CPU for microcode
   if lscpu | grep -q "Intel"; then
     base_pkgs+=(intel-ucode)
   elif lscpu | grep -q "AMD"; then
     base_pkgs+=(amd-ucode)
   fi
 
-  # Retry pacstrap up to 3 times
   local retries=3
   for i in $(seq 1 $retries); do
     if pacstrap /mnt "${base_pkgs[@]}"; then
@@ -171,7 +148,7 @@ install_base() {
   done
 }
 
-# ── Stage 3: Chroot configuration ────────────────────
+# ── Stage 3: Chroot configuration ───────────
 configure_chroot() {
   echo "--- Generating fstab ---"
   genfstab -U /mnt >> /mnt/etc/fstab
@@ -206,7 +183,7 @@ cat > /etc/hosts <<HOSTS
 127.0.1.1   \$hostname.localdomain  \$hostname
 HOSTS
 
-# Handle resolv.conf more carefully
+# Handle resolv.conf
 if [[ -L /etc/resolv.conf ]]; then
     rm -f /etc/resolv.conf
 elif [[ -f /etc/resolv.conf ]]; then
@@ -235,26 +212,21 @@ echo "--- Setting up users ---"
 useradd -m -G wheel,users,audio,video,storage,network -s /usr/bin/fish "\$username"
 echo "\$username:\$password" | chpasswd
 echo "root:\$password" | chpasswd
-chage -d 0 "\$username"  # Force password change on first login
+chage -d 0 "\$username"
 
-# Enable sudo for wheel group without password (for automation)
 echo "%wheel ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
 echo "--- Installing bootloader ---"
 if [[ -d /sys/firmware/efi/efivars ]]; then
-    echo "UEFI mode detected, installing GRUB for UEFI..."
     pacman --noconfirm -S grub efibootmgr
     grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --removable
     grub-mkconfig -o /boot/grub/grub.cfg
 else
-    echo "BIOS mode detected, installing GRUB for BIOS..."
     pacman --noconfirm -S grub
-    echo "Installing GRUB to \$disk"
     grub-install --target=i386-pc "\$disk"
     grub-mkconfig -o /boot/grub/grub.cfg
 fi
 
-echo "--- Setting up initramfs ---"
 sed -i 's/^COMPRESSION=.*/COMPRESSION="zstd"/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems keyboard keymap consolefont fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
@@ -266,112 +238,63 @@ systemctl enable gdm
 
 echo "--- Setting up VMware tools (if needed) ---"
 if lspci | grep -i vmware >/dev/null 2>&1 || dmesg | grep -i vmware >/dev/null 2>&1; then
-    echo "VMware environment detected, installing VMware tools..."
-    if pacman --noconfirm -S open-vm-tools gtkmm3; then
-        systemctl enable vmtoolsd
-        
-        # Enable optional services only if they exist
-        for service in vmware-vmblock-fuse vgauth vmhgfs-fuse; do
-            if systemctl list-unit-files "\$service.service" >/dev/null 2>&1; then
-                systemctl enable "\$service.service"
-                echo "Enabled \$service service"
-            else
-                echo "Note: \$service service not available"
-            fi
-        done
-        
-        echo "VMware tools configured successfully"
-    else
-        echo "Warning: Failed to install VMware tools"
-    fi
-else
-    echo "Not running in VMware, skipping VMware tools"
+    pacman --noconfirm -S open-vm-tools gtkmm3
+    systemctl enable vmtoolsd
+    for service in vmware-vmblock-fuse vgauth vmhgfs-fuse; do
+        if systemctl list-unit-files "\$service.service" >/dev/null 2>&1; then
+            systemctl enable "\$service.service"
+        fi
+    done
 fi
 
 echo "--- Setting up BlackArch repository ---"
-# Simplified and more reliable BlackArch setup
-setup_blackarch() {
-    echo "Setting up BlackArch repository..."
-
-    # Ensure entropy for key generation (install haveged for GPG entropy)
-    pacman --noconfirm -S haveged || true
-    systemctl enable haveged || true
-    systemctl start haveged || true
-
-    # Make sure the system time is correct
-    timedatectl set-ntp true
-
-    # Initialize and populate keyrings
-    pacman-key --init
-    pacman-key --populate archlinux
-
-    # Ensure network/dns works
-    ping -c 1 blackarch.org || { echo "Network not available!"; return 1; }
-
-    # Try the official installer
+# ---- BlackArch setup (robust version) ----
+pacman --noconfirm -S haveged || true
+systemctl enable haveged || true
+systemctl start haveged || true
+timedatectl set-ntp true
+pacman-key --init
+pacman-key --populate archlinux
+if ping -c 1 blackarch.org; then
     if bash <(curl -s https://blackarch.org/strap.sh) -- --noconfirm; then
         echo "BlackArch setup successful via official installer"
+        blackarch_available=true
     else
-        echo "Official installer failed, attempting manual setup..."
-
-        # Mirrorlist: overwrite with fresh working mirrors
         curl -s https://blackarch.org/mirrorlist/blackarch-mirrorlist.txt | grep '^Server' > /etc/pacman.d/blackarch-mirrorlist
-
-        # Add [blackarch] repo to pacman.conf if not present
-        if ! grep -q '\[blackarch\]' /etc/pacman.conf; then
+        if ! grep -q '\\[blackarch\\]' /etc/pacman.conf; then
             echo -e "\n[blackarch]\nInclude = /etc/pacman.d/blackarch-mirrorlist" >> /etc/pacman.conf
         fi
-
-        # Retry keyring installation several times for reliability
         for i in {1..5}; do
             pacman -Sy --noconfirm blackarch-keyring && break
             sleep 2
         done
         pacman-key --populate blackarch
+        blackarch_available=true
     fi
-
-    # Refresh keys and update
     pacman-key --refresh-keys || true
     pacman -Syyu --noconfirm || true
-
-    echo "BlackArch repo ready!"
-    return 0
-}
-
-# Try BlackArch setup but continue regardless
-if setup_blackarch; then
-    blackarch_available=true
-    echo "✓ BlackArch repository is available"
 else
     blackarch_available=false
-    echo "⚠ Continuing without BlackArch repository"
 fi
 
 echo "--- Installing AUR helper (yay) ---"
 sudo -u "\$username" bash <<EOYAY
 set -euo pipefail
 cd /home/\$username
-
 if git clone https://aur.archlinux.org/yay.git; then
     cd yay
     if makepkg -si --noconfirm; then
         cd ..
         rm -rf yay
-        echo "yay installed successfully"
     else
-        echo "Warning: Failed to build yay"
         cd ..
         rm -rf yay
     fi
-else
-    echo "Warning: Failed to clone yay repository"
 fi
 EOYAY
 
 echo "--- Installing penetration testing tools ---"
-
 # Official repo tools
-echo "Installing tools from official repositories..."
 official_tools=(
     nmap masscan nikto
     wireshark-qt tcpdump
@@ -383,24 +306,20 @@ official_tools=(
     python-impacket
     burpsuite
 )
-for tool in "${official_tools[@]}"; do
-    if pacman --noconfirm -S "$tool" 2>/dev/null; then
-        echo "✓ $tool installed from official repo"
+for tool in "\${official_tools[@]}"; do
+    if pacman --noconfirm -S "\$tool" 2>/dev/null; then
+        echo "✓ \$tool installed from official repo"
     else
-        echo "⚠ Warning: Failed to install $tool from official repo"
+        echo "⚠ Warning: Failed to install \$tool from official repo"
     fi
 done
 
-# Enable docker after install
 if systemctl list-unit-files | grep -q docker.service; then
     systemctl enable docker
-else
-    echo "Docker not installed, skipping enable"
 fi
 
 # AUR tools
 if command -v yay >/dev/null 2>&1; then
-    echo "Installing tools from AUR..."
     aur_tools=(
         gobuster
         ffuf
@@ -414,29 +333,26 @@ if command -v yay >/dev/null 2>&1; then
         recon-ng
         theharvester
     )
-    for tool in "${aur_tools[@]}"; do
+    for tool in "\${aur_tools[@]}"; do
         tool_success=false
         for attempt in {1..3}; do
-            if sudo -u "$username" yay --noconfirm --needed -S "$tool" 2>/dev/null; then
-                echo "✓ $tool installed from AUR"
+            if sudo -u "\$username" yay --noconfirm --needed -S "\$tool" 2>/dev/null; then
+                echo "✓ \$tool installed from AUR"
                 tool_success=true
                 break
             else
-                echo "Attempt $attempt to install $tool from AUR failed, retrying in 5s..."
+                echo "Attempt \$attempt to install \$tool from AUR failed, retrying in 5s..."
                 sleep 5
             fi
         done
-        if [ "$tool_success" = false ]; then
-            echo "⚠ Warning: Failed to install $tool from AUR after 3 attempts"
+        if [ "\$tool_success" = false ]; then
+            echo "⚠ Warning: Failed to install \$tool from AUR after 3 attempts"
         fi
     done
-else
-    echo "⚠ yay not available, skipping AUR tools"
 fi
 
 # BlackArch tools
-if [[ "$blackarch_available" == "true" ]]; then
-    echo "Installing tools from BlackArch repository..."
+if [[ "\$blackarch_available" == "true" ]]; then
     blackarch_tools=(
         evil-winrm
         responder
@@ -446,26 +362,23 @@ if [[ "$blackarch_available" == "true" ]]; then
         smbclient
         ldapdomaindump
     )
-    for tool in "${blackarch_tools[@]}"; do
+    for tool in "\${blackarch_tools[@]}"; do
         tool_success=false
         for attempt in {1..3}; do
-            if pacman --noconfirm -S "$tool" 2>/dev/null; then
-                echo "✓ $tool installed from BlackArch"
+            if pacman --noconfirm -S "\$tool" 2>/dev/null; then
+                echo "✓ \$tool installed from BlackArch"
                 tool_success=true
                 break
             else
-                echo "Attempt $attempt to install $tool from BlackArch failed, retrying in 5s..."
+                echo "Attempt \$attempt to install \$tool from BlackArch failed, retrying in 5s..."
                 sleep 5
             fi
         done
-        if [ "$tool_success" = false ]; then
-            echo "⚠ Warning: Failed to install $tool from BlackArch after 3 attempts"
+        if [ "\$tool_success" = false ]; then
+            echo "⚠ Warning: Failed to install \$tool from BlackArch after 3 attempts"
         fi
     done
-else
-    echo "BlackArch not available, skipping BlackArch-specific tools"
 fi
-
 
 echo "--- Creating workspace structure ---"
 mkdir -p /opt/workspace/{wordlists,scripts,tools,projects,loot}
@@ -474,26 +387,15 @@ chown -R "\$username:users" /opt/workspace
 chmod -R 755 /opt/workspace
 
 echo "--- Downloading common resources ---"
-# Download popular wordlists and tools
 sudo -u "\$username" bash <<'RESOURCES'
 cd /opt/workspace
-
-# Create subdirectories
 mkdir -p wordlists tools/{windows,linux} scripts
 
-# Download SecLists (most important wordlist collection)
 echo "Downloading SecLists..."
 if git clone --depth 1 https://github.com/danielmiessler/SecLists.git wordlists/SecLists; then
     echo "✓ SecLists downloaded successfully"
-else
-    echo "⚠ Warning: Failed to download SecLists"
 fi
 
-# Download common wordlists with better error handling
-echo "Downloading additional wordlists..."
-
-# Try multiple sources for rockyou
-# Try downloading bz2 first (usually much faster/more reliable)
 if wget -q --timeout=30 -O wordlists/rockyou.txt.bz2 "https://download.weakpass.com/wordlists/90/rockyou.txt.bz2"; then
     bunzip2 wordlists/rockyou.txt.bz2 2>/dev/null || echo "⚠ Warning: Failed to extract rockyou.txt.bz2"
 elif wget -q --timeout=30 -O wordlists/rockyou.txt "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt"; then
@@ -502,56 +404,30 @@ else
     echo "⚠ Warning: Failed to download rockyou.txt from all sources"
 fi
 
-# Download useful tools
-echo "Downloading useful tools..."
-
-# Linpeas
 wget -q --timeout=30 -O tools/linux/linpeas.sh \
-    "https://github.com/carlospolop/PEASS-ng/releases/latest/download/linpeas.sh" || \
-    echo "⚠ Warning: Failed to download linpeas.sh"
-
-# WinPEAS
+    "https://github.com/carlospolop/PEASS-ng/releases/latest/download/linpeas.sh" || true
 wget -q --timeout=30 -O tools/windows/winPEAS.bat \
-    "https://github.com/carlospolop/PEASS-ng/releases/latest/download/winPEAS.bat" || \
-    echo "⚠ Warning: Failed to download winPEAS.bat"
+    "https://github.com/carlospolop/PEASS-ng/releases/latest/download/winPEAS.bat" || true
 
-# Make downloaded scripts executable
 chmod +x tools/linux/*.sh 2>/dev/null || true
 
-echo "Resource download completed"
 RESOURCES
 
 echo "--- Enabling services ---"
-pacman --noconfirm -S docker docker-compose
-
-if systemctl list-unit-files | grep -q docker.service; then
-    systemctl enable docker
-else
-    echo "Docker not installed, skipping enable"
-fi
-
 systemctl enable sshd
 
-
-echo "--- Final system configuration ---"
-# Add user to docker group
 usermod -aG docker "\$username"
-
-# Set up fish shell for user
 sudo -u "\$username" fish -c "set -U fish_greeting ''"
-
 echo "Stage 2 completed successfully"
 EOF
 
   chmod +x /mnt/pentest-stage2.sh
   echo "--- Entering chroot & running stage2 ---"
   arch-chroot /mnt /pentest-stage2.sh
-  
-  # Clean up the stage2 script
   rm -f /mnt/pentest-stage2.sh
 }
 
-# ── Stage 4: Cleanup ─────────────────────────────────
+# ── Stage 4: Cleanup ────────────────────────
 cleanup() {
   echo "--- Final sync & unmount ---"
   sync
@@ -576,11 +452,8 @@ cleanup() {
   echo "• VMware tools (if running in VMware)"
 }
 
-# ── Main ─────────────────────────────────────────────
 echo "🚀 Starting Arch Linux Penetration Testing VM installation..."
-echo "This will install a full penetration testing environment."
 echo ""
-
 prepare_disk
 install_base
 configure_chroot
