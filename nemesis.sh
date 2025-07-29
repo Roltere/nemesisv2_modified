@@ -24,7 +24,7 @@ Usage: $0 [-n hostname] [-u username] [-P password] [-S swap_size] [-f fs] [-d d
   -P Password (default: $password)
   -S Swapfile size (e.g. 4G; default: $swap_size)
   -f Root FS type (ext4, btrfs; default: $filesystem)
-  -d Target disk (e.g. /dev/sda; auto‑detected if omitted)
+  -d Target disk (e.g. /dev/sda; auto-detected if omitted)
 EOF
   exit 1
 }
@@ -63,7 +63,6 @@ prepare_disk() {
   echo "Using disk: $disk"
 
   wipefs -af "$disk"
-
   if [[ -d /sys/firmware/efi/efivars ]]; then
     echo "UEFI mode detected"
     parted --script "$disk" mklabel gpt
@@ -78,15 +77,12 @@ prepare_disk() {
   fi
 
   partprobe "$disk"
-  udevadm settle
-  sleep 2
+  udevadm settle; sleep 2
 
   if [[ "$disk" =~ nvme ]]; then
-    disk1="${disk}p1"
-    disk2="${disk}p2"
+    disk1="${disk}p1"; disk2="${disk}p2"
   else
-    disk1="${disk}1"
-    disk2="${disk}2"
+    disk1="${disk}1"; disk2="${disk}2"
   fi
 
   mkdir -p /mnt /mnt/boot
@@ -114,10 +110,10 @@ setup_swap() {
 # ── Stage 3: Base install ────────────────────────────
 install_base() {
   echo "--- Enabling community & multilib repos ---"
-  sed -i '/^#\[community\]$/s/^#//' /etc/pacman.conf
-  sed -i '/^#Include = \/etc\/pacman.d\/community-mirrorlist$/s/^#//' /etc/pacman.conf
-  sed -i '/^#\[multilib\]$/s/^#//' /etc/pacman.conf
-  sed -i '/^#Include = \/etc\/pacman.d\/multilib-mirrorlist$/s/^#//' /etc/pacman.conf
+  sed -i '/^#\s*\[community\]$/s/^#\s*//' /etc/pacman.conf
+  sed -i '/^#\s*Include = \/etc\/pacman.d\/community-mirrorlist$/s/^#\s*//' /etc/pacman.conf
+  sed -i '/^#\s*\[multilib\]$/s/^#\s*//' /etc/pacman.conf
+  sed -i '/^#\s*Include = \/etc\/pacman.d\/multilib-mirrorlist$/s/^#\s*//' /etc/pacman.conf
 
   echo "--- Syncing package databases ---"
   pacman --noconfirm -Sy || die "Failed to sync pacman databases"
@@ -176,14 +172,14 @@ hostname="main"
 username="main"
 password="$password"
 
-echo "--- Time & locale setup ---"
+echo "--- Time & locale ---"
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 hwclock --systohc
 echo "en_GB.UTF-8 UTF-8" > /etc/locale.gen
 locale-gen
 echo LANG=en_GB.UTF-8 > /etc/locale.conf
 
-echo "--- Hostname & network setup ---"
+echo "--- Hostname & network ---"
 echo "\$hostname" > /etc/hostname
 cat > /etc/hosts <<HOSTS
 127.0.0.1   localhost
@@ -193,7 +189,7 @@ HOSTS
 systemctl enable systemd-resolved NetworkManager
 systemctl start systemd-resolved NetworkManager
 
-sed -i '/#\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
+echo "--- Full system upgrade ---"
 pacman --noconfirm -Syu
 
 echo "--- Initramfs build ---"
@@ -207,7 +203,7 @@ echo -e "\$password\n\$password" | passwd "\$username"
 chage -d 0 "\$username"
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
-echo "--- Installing GRUB... ---"
+echo "--- Installing bootloader ---"
 if [[ -d /sys/firmware/efi/efivars ]]; then
   pacman --noconfirm -S grub efibootmgr
   grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --removable
@@ -224,7 +220,7 @@ git clone https://github.com/Fausto-Korpsvart/Catppuccin-GTK-Theme.git /usr/shar
 su -l "\$username" -c "gsettings set org.gnome.desktop.interface gtk-theme 'Catppuccin'"
 su -l "\$username" -c "gsettings set org.gnome.shell.extensions.user-theme name 'Catppuccin'"
 
-echo "--- Enable core services ---"
+echo "--- Enabling services ---"
 systemctl enable NetworkManager.service
 systemctl enable systemd-resolved.service
 systemctl enable sshd.service
@@ -232,11 +228,11 @@ systemctl enable docker.service
 systemctl enable smartd.service
 systemctl enable gdm.service
 
-echo "--- Set default terminal to Terminator ---"
+echo "--- Default terminal: Terminator ---"
 su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.terminal exec 'terminator'"
 su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.terminal exec-arg '-x'"
 
-echo "--- Installing AUR helper (yay) as user ---"
+echo "--- Installing AUR helper (yay) ---"
 runuser -u "\$username" -- bash -lc "cd /home/\$username && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg --noconfirm -si && cd .. && rm -rf yay"
 
 echo "Stage 2 completed successfully"
