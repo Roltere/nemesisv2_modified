@@ -299,8 +299,29 @@ systemctl enable sshd
 if lspci | grep -i vmware >/dev/null 2>&1 || dmesg | grep -i vmware >/dev/null 2>&1; then
     echo "VMware environment detected, installing VMware tools..."
     if pacman --noconfirm -S open-vm-tools; then
-        systemctl enable vmtoolsd vmware-vmblock-fuse
-        systemctl enable vgauth.service vmhgfs-fuse.service
+        # Enable core VMware services that should always exist
+        systemctl enable vmtoolsd
+        
+        # Enable optional services only if they exist
+        if systemctl list-unit-files vmware-vmblock-fuse.service >/dev/null 2>&1; then
+            systemctl enable vmware-vmblock-fuse
+        else
+            echo "Note: vmware-vmblock-fuse service not available"
+        fi
+        
+        if systemctl list-unit-files vgauth.service >/dev/null 2>&1; then
+            systemctl enable vgauth.service
+        else
+            echo "Note: vgauth service not available"
+        fi
+        
+        if systemctl list-unit-files vmhgfs-fuse.service >/dev/null 2>&1; then
+            systemctl enable vmhgfs-fuse.service
+        else
+            echo "Note: vmhgfs-fuse service not available"
+        fi
+        
+        echo "VMware tools configured successfully"
     else
         echo "Warning: Failed to install VMware tools"
     fi
