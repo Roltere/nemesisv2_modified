@@ -433,11 +433,20 @@ if [[ "\$blackarch_available" == "true" ]]; then
     )
     
     for tool in "\${blackarch_tools[@]}"; do
-        if pacman --noconfirm -S "\$tool" 2>/dev/null; then
-            echo "✓ \$tool installed from BlackArch"
-        else
-            echo "⚠ Warning: Failed to install \$tool from BlackArch"
-        fi
+        tool_success=false
+        for attempt in {1..3}; do
+            if pacman --noconfirm -S "$tool" 2>/dev/null; then
+                echo "✓ $tool installed from BlackArch"
+                tool_success=true
+                break
+            else
+                echo "Attempt $attempt to install $tool failed, retrying in 5s..."
+                sleep 5
+            fi
+    done
+    if [ "$tool_success" = false ]; then
+        echo "⚠ Warning: Failed to install $tool from BlackArch after 3 attempts"
+    fi
     done
 else
     echo "BlackArch not available, skipping BlackArch-specific tools"
@@ -469,14 +478,13 @@ fi
 echo "Downloading additional wordlists..."
 
 # Try multiple sources for rockyou
-if ! wget -q --timeout=30 -O wordlists/rockyou.txt.gz "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt"; then
-    if ! wget -q --timeout=30 -O wordlists/rockyou.txt.bz2 "https://download.weakpass.com/wordlists/90/rockyou.txt.bz2"; then
-        echo "⚠ Warning: Failed to download rockyou.txt from all sources"
-    else
-        bunzip2 wordlists/rockyou.txt.bz2 2>/dev/null || echo "⚠ Warning: Failed to extract rockyou.txt"
-    fi
+# Try downloading bz2 first (usually much faster/more reliable)
+if wget -q --timeout=30 -O wordlists/rockyou.txt.bz2 "https://download.weakpass.com/wordlists/90/rockyou.txt.bz2"; then
+    bunzip2 wordlists/rockyou.txt.bz2 2>/dev/null || echo "⚠ Warning: Failed to extract rockyou.txt.bz2"
+elif wget -q --timeout=30 -O wordlists/rockyou.txt "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt"; then
+    echo "✓ Downloaded rockyou.txt (plain text, no extraction needed)"
 else
-    gunzip wordlists/rockyou.txt.gz 2>/dev/null || echo "⚠ Warning: Failed to extract rockyou.txt"
+    echo "⚠ Warning: Failed to download rockyou.txt from all sources"
 fi
 
 # Download useful tools
@@ -499,7 +507,16 @@ echo "Resource download completed"
 RESOURCES
 
 echo "--- Enabling services ---"
-systemctl enable sshd docker
+pacman --noconfirm -S docker docker-compose
+
+if systemctl list-unit-files | grep -q docker.service; then
+    systemctl enable docker
+else
+    echo "Docker not installed, skipping enable"
+fi
+
+systemctl enable sshd
+
 
 echo "--- Final system configuration ---"
 # Add user to docker group
