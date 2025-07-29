@@ -370,69 +370,83 @@ EOYAY
 
 echo "--- Installing penetration testing tools ---"
 
-# First, update system and install tools from official Arch repos
+# Official repo tools
 echo "Installing tools from official repositories..."
-pacman --noconfirm -S \
-    nmap masscan nikto \
-    wireshark-qt tcpdump \
-    aircrack-ng \
-    binwalk foremost \
-    docker docker-compose \
-    gnu-netcat socat \
-    hashcat john \
-    python-impacket \
-    burpsuite \
-    || echo "Some official repo tools failed to install"
+official_tools=(
+    nmap masscan nikto
+    wireshark-qt tcpdump
+    aircrack-ng
+    binwalk foremost
+    docker docker-compose
+    gnu-netcat socat
+    hashcat john
+    python-impacket
+    burpsuite
+)
+for tool in "${official_tools[@]}"; do
+    if pacman --noconfirm -S "$tool" 2>/dev/null; then
+        echo "✓ $tool installed from official repo"
+    else
+        echo "⚠ Warning: Failed to install $tool from official repo"
+    fi
+done
 
-# Install AUR tools only if yay is available
+# Enable docker after install
+if systemctl list-unit-files | grep -q docker.service; then
+    systemctl enable docker
+else
+    echo "Docker not installed, skipping enable"
+fi
+
+# AUR tools
 if command -v yay >/dev/null 2>&1; then
     echo "Installing tools from AUR..."
-    
-    # Install tools with better error handling
-    install_aur_tool() {
-        local tool=\$1
-        local package=\$2
-        echo "Installing \$tool..."
-        if sudo -u "\$username" yay --noconfirm --needed -S "\$package" 2>/dev/null; then
-            echo "✓ \$tool installed successfully"
-        else
-            echo "⚠ Warning: Failed to install \$tool from AUR"
+    aur_tools=(
+        gobuster
+        ffuf
+        sqlmap
+        hydra
+        medusa
+        metasploit
+        dirb
+        whatweb
+        proxychains-ng
+        recon-ng
+        theharvester
+    )
+    for tool in "${aur_tools[@]}"; do
+        tool_success=false
+        for attempt in {1..3}; do
+            if sudo -u "$username" yay --noconfirm --needed -S "$tool" 2>/dev/null; then
+                echo "✓ $tool installed from AUR"
+                tool_success=true
+                break
+            else
+                echo "Attempt $attempt to install $tool from AUR failed, retrying in 5s..."
+                sleep 5
+            fi
+        done
+        if [ "$tool_success" = false ]; then
+            echo "⚠ Warning: Failed to install $tool from AUR after 3 attempts"
         fi
-    }
-
-    # AUR-specific tools
-    install_aur_tool "Gobuster" "gobuster"
-    install_aur_tool "FFuF" "ffuf"
-    install_aur_tool "SQLMap" "sqlmap"
-    install_aur_tool "Hydra" "hydra"
-    install_aur_tool "Medusa" "medusa"
-    install_aur_tool "Metasploit Framework" "metasploit"
-    install_aur_tool "Dirb" "dirb"
-    install_aur_tool "Whatweb" "whatweb"
-    install_aur_tool "Proxychains" "proxychains-ng"
-    install_aur_tool "Recon-ng" "recon-ng"
-    install_aur_tool "theHarvester" "theharvester"
-    
+    done
 else
     echo "⚠ yay not available, skipping AUR tools"
 fi
 
-# Install BlackArch tools if available
-if [[ "\$blackarch_available" == "true" ]]; then
+# BlackArch tools
+if [[ "$blackarch_available" == "true" ]]; then
     echo "Installing tools from BlackArch repository..."
-    
-    # BlackArch tools with error handling
     blackarch_tools=(
-        "evil-winrm"
-        "responder"
-        "bloodhound"
-        "crackmapexec"
-        "enum4linux"
-        "smbclient"
-        "ldapdomaindump"
+        evil-winrm
+        responder
+        bloodhound
+        crackmapexec
+        enum4linux
+        smbclient
+        ldapdomaindump
     )
-    
-    for tool in "\${blackarch_tools[@]}"; do
+    for tool in "${blackarch_tools[@]}"; do
         tool_success=false
         for attempt in {1..3}; do
             if pacman --noconfirm -S "$tool" 2>/dev/null; then
@@ -440,17 +454,18 @@ if [[ "\$blackarch_available" == "true" ]]; then
                 tool_success=true
                 break
             else
-                echo "Attempt $attempt to install $tool failed, retrying in 5s..."
+                echo "Attempt $attempt to install $tool from BlackArch failed, retrying in 5s..."
                 sleep 5
             fi
-    done
-    if [ "$tool_success" = false ]; then
-        echo "⚠ Warning: Failed to install $tool from BlackArch after 3 attempts"
-    fi
+        done
+        if [ "$tool_success" = false ]; then
+            echo "⚠ Warning: Failed to install $tool from BlackArch after 3 attempts"
+        fi
     done
 else
     echo "BlackArch not available, skipping BlackArch-specific tools"
 fi
+
 
 echo "--- Creating workspace structure ---"
 mkdir -p /opt/workspace/{wordlists,scripts,tools,projects,loot}
