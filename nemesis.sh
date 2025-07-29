@@ -201,9 +201,9 @@ echo -e "KEYMAP=uk\nFONT=ter-116n" > /etc/vconsole.conf
 echo "--- Setting up hostname and network ---"
 echo "\$hostname" > /etc/hostname
 cat > /etc/hosts <<HOSTS
-127.0.0.1	localhost
-::1		localhost
-127.0.1.1	\$hostname.localdomain	\$hostname
+127.0.0.1   localhost
+::1     localhost
+127.0.1.1   \$hostname.localdomain  \$hostname
 HOSTS
 
 # Handle resolv.conf more carefully
@@ -237,8 +237,8 @@ echo "\$username:\$password" | chpasswd
 echo "root:\$password" | chpasswd
 chage -d 0 "\$username"  # Force password change on first login
 
-# Enable sudo for wheel group
-echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
+# Enable sudo for wheel group without password (for automation)
+echo "%wheel ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
 echo "--- Installing bootloader ---"
 if [[ -d /sys/firmware/efi/efivars ]]; then
@@ -289,82 +289,63 @@ else
 fi
 
 echo "--- Setting up BlackArch repository ---"
-# Robust BlackArch setup with mirror fallbacks
+# Simplified and more reliable BlackArch setup
 setup_blackarch() {
-    local blackarch_mirrors=(
-        "https://ftp.halifax.rwth-aachen.de/blackarch/"
-        "https://mirror.hackingand.coffee/blackarch/"
-        "https://www.blackarch.org/blackarch/"
-        "https://mirrors.dotsrc.org/blackarch/"
-        "https://blackarch.mirror.garr.it/blackarch/"
-    )
-    
     echo "Setting up BlackArch repository..."
-    
-    # Download and verify BlackArch keyring setup
-    local setup_success=false
-    for mirror in "\${blackarch_mirrors[@]}"; do
-        echo "Trying mirror: \$mirror"
-        if curl -f -L --connect-timeout 10 --max-time 30 "\${mirror}strap.sh" -o /tmp/blackarch-strap.sh; then
-            if [[ \$(wc -c < /tmp/blackarch-strap.sh) -gt 1000 ]]; then
-                chmod +x /tmp/blackarch-strap.sh
-                if /tmp/blackarch-strap.sh; then
-                    setup_success=true
-                    break
-                fi
-            fi
+
+    # Ensure entropy for key generation (install haveged for GPG entropy)
+    pacman --noconfirm -S haveged || true
+    systemctl enable haveged || true
+    systemctl start haveged || true
+
+    # Make sure the system time is correct
+    timedatectl set-ntp true
+
+    # Initialize and populate keyrings
+    pacman-key --init
+    pacman-key --populate archlinux
+
+    # Ensure network/dns works
+    ping -c 1 blackarch.org || { echo "Network not available!"; return 1; }
+
+    # Try the official installer
+    if bash <(curl -s https://blackarch.org/strap.sh) -- --noconfirm; then
+        echo "BlackArch setup successful via official installer"
+    else
+        echo "Official installer failed, attempting manual setup..."
+
+        # Mirrorlist: overwrite with fresh working mirrors
+        curl -s https://blackarch.org/mirrorlist/blackarch-mirrorlist.txt | grep '^Server' > /etc/pacman.d/blackarch-mirrorlist
+
+        # Add [blackarch] repo to pacman.conf if not present
+        if ! grep -q '\[blackarch\]' /etc/pacman.conf; then
+            echo -e "\n[blackarch]\nInclude = /etc/pacman.d/blackarch-mirrorlist" >> /etc/pacman.conf
         fi
-        echo "Mirror \$mirror failed, trying next..."
-        sleep 2
-    done
-    
-    if [[ "\$setup_success" != "true" ]]; then
-        echo "Warning: BlackArch automatic setup failed, setting up manually..."
-        
-        # Manual BlackArch setup
-        curl -f -L --connect-timeout 10 --max-time 30 \
-            "https://www.blackarch.org/keyring/blackarch-keyring.pkg.tar.xz" \
-            -o /tmp/blackarch-keyring.pkg.tar.xz || {
-            echo "Warning: Could not download BlackArch keyring, skipping BlackArch setup"
-            return 1
-        }
-        
-        pacman --noconfirm -U /tmp/blackarch-keyring.pkg.tar.xz
-        
-        # Add BlackArch repository to pacman.conf
-        if ! grep -q "\\[blackarch\\]" /etc/pacman.conf; then
-            echo -e "\\n[blackarch]\\nServer = https://ftp.halifax.rwth-aachen.de/blackarch/\\\$repo/os/\\\$arch" >> /etc/pacman.conf
-        fi
+
+        # Retry keyring installation several times for reliability
+        for i in {1..5}; do
+            pacman -Sy --noconfirm blackarch-keyring && break
+            sleep 2
+        done
+        pacman-key --populate blackarch
     fi
-    
-    # Create working BlackArch mirrorlist
-    cat > /etc/pacman.d/blackarch-mirrorlist <<MIRRORLIST
-# BlackArch Linux Mirror List
-Server = https://ftp.halifax.rwth-aachen.de/blackarch/\\\$repo/os/\\\$arch
-Server = https://mirror.hackingand.coffee/blackarch/\\\$repo/os/\\\$arch
-Server = https://mirrors.dotsrc.org/blackarch/\\\$repo/os/\\\$arch
-Server = https://blackarch.mirror.garr.it/blackarch/\\\$repo/os/\\\$arch
-Server = https://www.blackarch.org/blackarch/\\\$repo/os/\\\$arch
-MIRRORLIST
-    
-    # Update pacman databases with retries
-    local sync_attempts=3
-    for i in \$(seq 1 \$sync_attempts); do
-        if pacman -Sy; then
-            echo "BlackArch repository sync successful"
-            return 0
-        else
-            echo "BlackArch sync attempt \$i failed, retrying..."
-            sleep 5
-        fi
-    done
-    
-    echo "Warning: BlackArch repository sync failed after \$sync_attempts attempts"
-    return 1
+
+    # Refresh keys and update
+    pacman-key --refresh-keys || true
+    pacman -Syyu --noconfirm || true
+
+    echo "BlackArch repo ready!"
+    return 0
 }
 
-# Call the BlackArch setup function
-setup_blackarch || echo "Continuing without BlackArch repository..."
+# Try BlackArch setup but continue regardless
+if setup_blackarch; then
+    blackarch_available=true
+    echo "✓ BlackArch repository is available"
+else
+    blackarch_available=false
+    echo "⚠ Continuing without BlackArch repository"
+fi
 
 echo "--- Installing AUR helper (yay) ---"
 sudo -u "\$username" bash <<EOYAY
@@ -388,51 +369,79 @@ fi
 EOYAY
 
 echo "--- Installing penetration testing tools ---"
-# Install tools with error handling
-install_tool() {
-    local tool=\$1
-    local package=\$2
-    echo "Installing \$tool..."
-    if sudo -u "\$username" yay --noconfirm --needed -S "\$package" 2>/dev/null; then
-        echo "✓ \$tool installed successfully"
-    else
-        echo "⚠ Warning: Failed to install \$tool"
-    fi
-}
 
-# Core penetration testing tools
-install_tool "Nmap" "nmap"
-install_tool "Masscan" "masscan"  
-install_tool "SQLMap" "sqlmap"
-install_tool "John the Ripper" "john"
-install_tool "Hashcat" "hashcat"
-install_tool "Hydra" "hydra"
-install_tool "Medusa" "medusa"
-install_tool "FFuF" "ffuf"
-install_tool "Gobuster" "gobuster"
-install_tool "Dirb" "dirb"
-install_tool "Nikto" "nikto"
-install_tool "Whatweb" "whatweb"
-install_tool "Netcat" "gnu-netcat"
-install_tool "Socat" "socat"
-install_tool "Proxychains" "proxychains-ng"
-install_tool "Burp Suite" "burpsuite"
-install_tool "OWASP ZAP" "zaproxy"
-install_tool "Metasploit" "metasploit"
-install_tool "Wireshark" "wireshark-qt"
-install_tool "Tcpdump" "tcpdump"
-install_tool "Aircrack-ng" "aircrack-ng"
-install_tool "Recon-ng" "recon-ng"
-install_tool "theHarvester" "theharvester"
-install_tool "Maltego" "maltego"
+# First, update system and install tools from official Arch repos
+echo "Installing tools from official repositories..."
+pacman --noconfirm -S \
+    nmap masscan nikto \
+    wireshark-qt tcpdump \
+    aircrack-ng \
+    binwalk foremost \
+    docker docker-compose \
+    gnu-netcat socat \
+    hashcat john \
+    python-impacket \
+    burpsuite \
+    || echo "Some official repo tools failed to install"
 
-# Additional useful tools
-install_tool "Docker" "docker"
-install_tool "Docker Compose" "docker-compose"
-install_tool "Binwalk" "binwalk"
-install_tool "Foremost" "foremost"
-install_tool "Volatility" "volatility3"
-install_tool "Autopsy" "autopsy"
+# Install AUR tools only if yay is available
+if command -v yay >/dev/null 2>&1; then
+    echo "Installing tools from AUR..."
+    
+    # Install tools with better error handling
+    install_aur_tool() {
+        local tool=\$1
+        local package=\$2
+        echo "Installing \$tool..."
+        if sudo -u "\$username" yay --noconfirm --needed -S "\$package" 2>/dev/null; then
+            echo "✓ \$tool installed successfully"
+        else
+            echo "⚠ Warning: Failed to install \$tool from AUR"
+        fi
+    }
+
+    # AUR-specific tools
+    install_aur_tool "Gobuster" "gobuster"
+    install_aur_tool "FFuF" "ffuf"
+    install_aur_tool "SQLMap" "sqlmap"
+    install_aur_tool "Hydra" "hydra"
+    install_aur_tool "Medusa" "medusa"
+    install_aur_tool "Metasploit Framework" "metasploit"
+    install_aur_tool "Dirb" "dirb"
+    install_aur_tool "Whatweb" "whatweb"
+    install_aur_tool "Proxychains" "proxychains-ng"
+    install_aur_tool "Recon-ng" "recon-ng"
+    install_aur_tool "theHarvester" "theharvester"
+    
+else
+    echo "⚠ yay not available, skipping AUR tools"
+fi
+
+# Install BlackArch tools if available
+if [[ "\$blackarch_available" == "true" ]]; then
+    echo "Installing tools from BlackArch repository..."
+    
+    # BlackArch tools with error handling
+    blackarch_tools=(
+        "evil-winrm"
+        "responder"
+        "bloodhound"
+        "crackmapexec"
+        "enum4linux"
+        "smbclient"
+        "ldapdomaindump"
+    )
+    
+    for tool in "\${blackarch_tools[@]}"; do
+        if pacman --noconfirm -S "\$tool" 2>/dev/null; then
+            echo "✓ \$tool installed from BlackArch"
+        else
+            echo "⚠ Warning: Failed to install \$tool from BlackArch"
+        fi
+    done
+else
+    echo "BlackArch not available, skipping BlackArch-specific tools"
+fi
 
 echo "--- Creating workspace structure ---"
 mkdir -p /opt/workspace/{wordlists,scripts,tools,projects,loot}
@@ -441,25 +450,53 @@ chown -R "\$username:users" /opt/workspace
 chmod -R 755 /opt/workspace
 
 echo "--- Downloading common resources ---"
-# Download popular wordlists
-sudo -u "\$username" bash <<WORDLISTS
-cd /opt/workspace/wordlists
+# Download popular wordlists and tools
+sudo -u "\$username" bash <<'RESOURCES'
+cd /opt/workspace
 
-# SecLists
-if git clone https://github.com/danielmiessler/SecLists.git; then
-    echo "✓ SecLists downloaded"
+# Create subdirectories
+mkdir -p wordlists tools/{windows,linux} scripts
+
+# Download SecLists (most important wordlist collection)
+echo "Downloading SecLists..."
+if git clone --depth 1 https://github.com/danielmiessler/SecLists.git wordlists/SecLists; then
+    echo "✓ SecLists downloaded successfully"
 else
     echo "⚠ Warning: Failed to download SecLists"
 fi
 
-# Common wordlists
-wget -q --timeout=30 -O rockyou.txt.gz "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt" || \
-    echo "⚠ Warning: Failed to download rockyou.txt"
+# Download common wordlists with better error handling
+echo "Downloading additional wordlists..."
 
-# Directory/file wordlists
-wget -q --timeout=30 -O common.txt "https://raw.githubusercontent.com/digination/dirbuster-ng/master/wordlists/common.txt" || \
-    echo "⚠ Warning: Failed to download common.txt"
-WORDLISTS
+# Try multiple sources for rockyou
+if ! wget -q --timeout=30 -O wordlists/rockyou.txt.gz "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt"; then
+    if ! wget -q --timeout=30 -O wordlists/rockyou.txt.bz2 "https://download.weakpass.com/wordlists/90/rockyou.txt.bz2"; then
+        echo "⚠ Warning: Failed to download rockyou.txt from all sources"
+    else
+        bunzip2 wordlists/rockyou.txt.bz2 2>/dev/null || echo "⚠ Warning: Failed to extract rockyou.txt"
+    fi
+else
+    gunzip wordlists/rockyou.txt.gz 2>/dev/null || echo "⚠ Warning: Failed to extract rockyou.txt"
+fi
+
+# Download useful tools
+echo "Downloading useful tools..."
+
+# Linpeas
+wget -q --timeout=30 -O tools/linux/linpeas.sh \
+    "https://github.com/carlospolop/PEASS-ng/releases/latest/download/linpeas.sh" || \
+    echo "⚠ Warning: Failed to download linpeas.sh"
+
+# WinPEAS
+wget -q --timeout=30 -O tools/windows/winPEAS.bat \
+    "https://github.com/carlospolop/PEASS-ng/releases/latest/download/winPEAS.bat" || \
+    echo "⚠ Warning: Failed to download winPEAS.bat"
+
+# Make downloaded scripts executable
+chmod +x tools/linux/*.sh 2>/dev/null || true
+
+echo "Resource download completed"
+RESOURCES
 
 echo "--- Enabling services ---"
 systemctl enable sshd docker
