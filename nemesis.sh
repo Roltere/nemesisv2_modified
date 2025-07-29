@@ -47,14 +47,13 @@ echo "=== Arch-VM install started: $(date) ==="
 
 loadkeys uk
 timedatectl set-ntp true
-
 die() { echo "$*" >&2; exit 1; }
 
 # ── Stage 1: Disk prep ────────────────────────────────
 prepare_disk() {
   echo "--- Preparing disk ---"
-  swapoff -a 2>/dev/null || true
-  umount -R /mnt 2>/dev/null || true
+  swapoff -a || true
+  umount -R /mnt || true
 
   if [[ -z "$disk" ]]; then
     disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/" $1; exit}')
@@ -64,20 +63,17 @@ prepare_disk() {
 
   wipefs -af "$disk"
   if [[ -d /sys/firmware/efi/efivars ]]; then
-    echo "UEFI mode detected"
     parted --script "$disk" mklabel gpt
     parted --script "$disk" mkpart ESP fat32 1MiB 261MiB
     parted --script "$disk" set 1 esp on
     parted --script "$disk" mkpart primary "$filesystem" 261MiB 100%
   else
-    echo "BIOS mode detected"
     parted --script "$disk" mklabel msdos
     parted --script "$disk" mkpart primary "$filesystem" 1MiB 100%
     parted --script "$disk" set 1 boot on
   fi
 
-  partprobe "$disk"
-  udevadm settle; sleep 2
+  partprobe "$disk"; udevadm settle; sleep 2
 
   if [[ "$disk" =~ nvme ]]; then
     disk1="${disk}p1"; disk2="${disk}p2"
@@ -86,7 +82,6 @@ prepare_disk() {
   fi
 
   mkdir -p /mnt /mnt/boot
-  echo "--- Formatting partitions ---"
   if [[ -d /sys/firmware/efi/efivars ]]; then
     mkfs.fat -F32 "$disk1"
     mkfs."$filesystem" -F "$disk2"
@@ -98,35 +93,17 @@ prepare_disk() {
   fi
 }
 
-# ── Stage 2: Swapfile ─────────────────────────────────
-setup_swap() {
-  echo "--- Creating ${swap_size} swapfile ---"
-  fallocate -l "$swap_size" /mnt/swapfile
-  chmod 600 /mnt/swapfile
-  mkswap /mnt/swapfile
-  swapon /mnt/swapfile
-}
-
-# ── Stage 3: Base install ────────────────────────────
+# ── Stage 2: Base install ────────────────────────────
 install_base() {
-  echo "--- Enabling community & multilib repos ---"
-  sed -i '/^#\s*\[community\]$/s/^#\s*//' /etc/pacman.conf
-  sed -i '/^#\s*Include = \/etc\/pacman.d\/community-mirrorlist$/s/^#\s*//' /etc/pacman.conf
-  sed -i '/^#\s*\[multilib\]$/s/^#\s*//' /etc/pacman.conf
-  sed -i '/^#\s*Include = \/etc\/pacman.d\/multilib-mirrorlist$/s/^#\s*//' /etc/pacman.conf
-
-  echo "--- Syncing package databases ---"
-  pacman --noconfirm -Sy || die "Failed to sync pacman databases"
-
-  echo "--- Ranking mirrors (if reflector installed) ---"
-  if pacman --noconfirm -S --needed reflector; then
-    timeout 120 reflector --protocol https --latest 20 \
-      --sort rate --connection-timeout 10 \
-      --download-timeout 30 --save /etc/pacman.d/mirrorlist \
-      || echo "Warning: reflector failed"
+  echo "--- Preparing mirrors & repos ---"
+  if ! command -v reflector >/dev/null; then
+    pacman -Sy --noconfirm reflector
   fi
+  reflector --protocol https --latest 20 --sort rate --save /etc/pacman.d/mirrorlist || die "reflector failed"
 
-  echo "--- Installing base system packages ---"
+  pacman --noconfirm -Sy || die "Failed to sync databases"
+
+  echo "--- Installing base packages ---"
   local pkgs=(
     base linux linux-firmware sudo base-devel go dhcpcd
     networkmanager systemd-resolvconf openssh git neovim tmux
@@ -136,7 +113,7 @@ install_base() {
     nmap net-tools curl httpie rsync cmake make gcc clang
     python python-pip nodejs npm docker docker-compose
     htop atop iotop dstat pavucontrol vlc ffmpeg gimp
-    kitty terminator
+    kitty terminator open-vm-tools gtkmm3
   )
   local retries=3
   for i in $(seq 1 $retries); do
@@ -145,116 +122,172 @@ install_base() {
     else
       echo "pacstrap failed attempt $i"
       sleep 10
-      [[ $i -eq $retries ]] && die "pacstrap failed after $retries attempts"
+      [[ $i -eq $retries ]] && die "pacstrap failed"
     fi
   done
 }
 
-# ── Stage 4: Chroot config ────────────────────────────
-configure_chroot() {
-  echo "--- Copy DNS config into chroot ---"
-  cp /etc/resolv.conf /mnt/etc/resolv.conf
+# ── Stage 3: Write install vars for chroot ───────────
+write_vars() {
+  cat > /mnt/install.conf <<EOF
+export HOSTNAME="$hostname"
+export USERNAME="$username"
+export PASSWORD="$password"
+export SWAP_SIZE="$swap_size"
+EOF
+}
 
-  echo "--- Generating fstab & swap entry ---"
-  genfstab -U /mnt >> /mnt/etc/fstab
-  echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
-
-  cat > /mnt/nemesis-stage2.sh <<EOF
+# ── Stage 4: Create chroot script ────────────────────
+write_chroot_script() {
+  cat > /mnt/nemesis-stage2.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-trap 'echo "Error on line \$LINENO"; exit 1' ERR
+trap 'echo "Error on line $LINENO"; exit 1' ERR
 
-# DNS
-cp /etc/resolv.conf /etc/resolv.conf
+[ -f /install.conf ] && source /install.conf
 
-# Variables
-hostname="main"
-username="main"
-password="$password"
-
-echo "--- Time & locale ---"
+# Time & locale
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 hwclock --systohc
-echo "en_GB.UTF-8 UTF-8" > /etc/locale.gen
+systemctl enable --now systemd-timesyncd.service
+echo -e "C.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\nen_GB.UTF-8 UTF-8" > /etc/locale.gen
 locale-gen
 echo LANG=en_GB.UTF-8 > /etc/locale.conf
+echo -e "KEYMAP=uk\nFONT=Goha-16" > /etc/vconsole.conf
 
-echo "--- Hostname & network ---"
-echo "\$hostname" > /etc/hostname
-cat > /etc/hosts <<HOSTS
+# Hostname & network
+echo "$HOSTNAME" > /etc/hostname
+cat > /etc/hosts <<H
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   \$hostname.localdomain \$hostname
-HOSTS
-systemctl enable systemd-resolved NetworkManager
-systemctl start systemd-resolved NetworkManager
+127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
+H
+systemctl enable systemd-resolved NetworkManager sshd
+systemctl start systemd-resolved NetworkManager sshd
 
-echo "--- Full system upgrade ---"
+# Swapfile (create inside the installed system)
+fallocate -l "$SWAP_SIZE" /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+echo "/swapfile none swap defaults 0 0" >> /etc/fstab
+
+# User setup
+useradd -m -G wheel,users,audio,video,storage,network -s /bin/bash "$USERNAME"
+echo "$USERNAME:$PASSWORD" | chpasswd
+echo "root:$PASSWORD" | chpasswd
+
+# Sudoers: wheel can sudo without password (optional, for convenience)
+sed -i '/^# %wheel ALL=(ALL:ALL) NOPASSWD: ALL/s/^# //' /etc/sudoers
+
+# BlackArch repo (optional, remove if not needed)
+curl -O https://blackarch.org/strap.sh && bash strap.sh
+echo "Server = https://blackarch.org/blackarch/os/x86_64" > /etc/pacman.d/blackarch-mirrorlist
+
+# Full upgrade
 pacman --noconfirm -Syu
 
-echo "--- Initramfs build ---"
-sed -i 's/^COMPRESSION=.*/COMPRESSION="zstd"/' /etc/mkinitcpio.conf
-sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems keyboard keymap consolefont fsck)/' /etc/mkinitcpio.conf
-mkinitcpio -P
+# Workspace
+mkdir -p /opt/workspace/wordlists /opt/workspace/linux /opt/workspace/windows \
+         /opt/workspace/peassng /opt/workspace/chisel /opt/workspace/c2/sliver
+chgrp users /opt/workspace
+chmod 2775 /opt/workspace
+setfacl -Rdm g:users:rwx /opt/workspace
 
-echo "--- User setup ---"
-useradd -m -G wheel -s /usr/bin/fish "\$username"
-echo -e "\$password\n\$password" | passwd "\$username"
-chage -d 0 "\$username"
-echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
+# SSH hardening & key (edit as needed)
+cat >> /etc/ssh/sshd_config <<S
+PermitRootLogin yes
+PasswordAuthentication no
+MaxAuthTries 10
+S
+systemctl restart sshd
 
-echo "--- Installing bootloader ---"
-if [[ -d /sys/firmware/efi/efivars ]]; then
-  pacman --noconfirm -S grub efibootmgr
-  grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --removable
-  grub-mkconfig -o /boot/grub/grub.cfg
-else
-  pacman --noconfirm -S grub
-  grub-install --target=i386-pc "$disk"
-  grub-mkconfig -o /boot/grub/grub.cfg
-fi
+# VMware autostart
+mkdir -p /etc/xdg/autostart
+cp /etc/vmware-tools/vmware-user.desktop /etc/xdg/autostart/ || true
+systemctl enable vmtoolsd vmware-vmblock-fuse
 
-echo "--- Catppuccin GNOME Shell theme ---"
-pacman --noconfirm -S gtk-engine-murrine gnome-themes-extra gnome-shell-extension-user-theme
-git clone https://github.com/Fausto-Korpsvart/Catppuccin-GTK-Theme.git /usr/share/themes/Catppuccin
-su -l "\$username" -c "gsettings set org.gnome.desktop.interface gtk-theme 'Catppuccin'"
-su -l "\$username" -c "gsettings set org.gnome.shell.extensions.user-theme name 'Catppuccin'"
+# GUI + theme
+pacman --noconfirm -S xorg-server xorg-apps xorg-xinit gnome gnome-extra gdm
+systemctl enable gdm
+pacman --noconfirm -S gtk-engine-murrine gnome-themes-extra \
+  gnome-shell-extension-user-theme
+git clone https://github.com/Fausto-Korpsvart/Catppuccin-GTK-Theme.git \
+  /usr/share/themes/Catppuccin
+sudo -u "$USERNAME" gsettings set org.gnome.desktop.interface gtk-theme 'Catppuccin' || true
+sudo -u "$USERNAME" gsettings set org.gnome.shell.extensions.user-theme name 'Catppuccin' || true
+sudo -u "$USERNAME" gsettings set org.gnome.desktop.default-applications.terminal exec 'terminator' || true
+sudo -u "$USERNAME" gsettings set org.gnome.desktop.default-applications.terminal exec-arg '-x' || true
 
-echo "--- Enabling services ---"
-systemctl enable NetworkManager.service
-systemctl enable systemd-resolved.service
-systemctl enable sshd.service
-systemctl enable docker.service
-systemctl enable smartd.service
-systemctl enable gdm.service
+# AUR helper
+sudo -u "$USERNAME" git clone https://aur.archlinux.org/yay.git /home/$USERNAME/yay
+sudo -u "$USERNAME" bash -lc "cd /home/$USERNAME/yay && makepkg -si --noconfirm"
+rm -rf /home/$USERNAME/yay
 
-echo "--- Default terminal: Terminator ---"
-su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.terminal exec 'terminator'"
-su -l "\$username" -c "gsettings set org.gnome.desktop.default-applications.terminal exec-arg '-x'"
+# Attacker toolset
+sudo -u "$USERNAME" yay --noconfirm -Sy \
+  remmina socat go proxychains-ng nmap masscan impacket metasploit \
+  sqlmap john medusa ffuf seclists ldapdomaindump binwalk evil-winrm \
+  responder certipy httpx dnsx nuclei subfinder strace apachedirectorystudio
 
-echo "--- Installing AUR helper (yay) ---"
-runuser -u "\$username" -- bash -lc "cd /home/\$username && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg --noconfirm -si && cd .. && rm -rf yay"
-
-echo "Stage 2 completed successfully"
+# Wordlists & bins (optional)
+wget -O /opt/workspace/wordlists/rockyou.bz2 \
+  http://downloads.skullsecurity.org/passwords/rockyou.txt.bz2
+wget -O /opt/workspace/windows/binaries.zip \
+  https://github.com/interference-security/kali-windows-binaries/archive/refs/heads/master.zip
+wget -O /opt/workspace/windows/ghostpack_binaries.zip \
+  https://github.com/r3motecontrol/Ghostpack-CompiledBinaries/archive/refs/heads/master.zip
+wget -O /opt/workspace/peassng/linpeas.sh \
+  https://github.com/carlospolop/PEASS-ng/releases/download/20250401-a1b119bc/linpeas.sh
+wget -O /opt/workspace/peassng/winPEAS.bat \
+  https://github.com/carlospolop/PEASS-ng/releases/download/20250401-a1b119bc/winPEAS.bat
+wget -O /opt/workspace/peassng/winPEASx64.exe \
+  https://github.com/carlospolop/PEASS-ng/releases/download/20250401-a1b119bc/winPEASx64.exe
+wget -O /opt/workspace/peassng/winPEASx86.exe \
+  https://github.com/carlospolop/PEASS-ng/releases/download/20250401-a1b119bc/winPEASx86.exe
+7z a /opt/workspace/peassng/peassng.7z /opt/workspace/peassng/*
+rm -f /opt/workspace/peassng/linpeas.sh /opt/workspace/peassng/winPEAS*
+wget -O /opt/workspace/chisel/chisel_1.9.1_linux_amd64.gz \
+  https://github.com/jpillora/chisel/releases/download/v1.9.1/chisel_1.9.1_linux_amd64.gz
+wget -O /opt/workspace/chisel/chisel_1.9.1_windows_amd64.gz \
+  https://github.com/jpillora/chisel/releases/download/v1.9.1/chisel_1.9.1_windows_amd64.gz
+wget -O /opt/workspace/chisel/chisel_1.9.1_windows_386.gz \
+  https://github.com/jpillora/chisel/releases/download/v1.9.1/chisel_1.9.1_windows_386.gz
+wget -O /opt/workspace/c2/sliver/sliver-server_linux \
+  https://github.com/BishopFox/sliver/releases/download/v1.5.43/sliver-server_linux
+wget -O /opt/workspace/c2/sliver/sliver-client_linux \
+  https://github.com/BishopFox/sliver/releases/download/v1.5.43/sliver-client_linux
+7z a /opt/workspace/c2/sliver/sliver.7z /opt/workspace/c2/sliver/*
+rm -f /opt/workspace/c2/sliver/sliver-*
 EOF
 
   chmod +x /mnt/nemesis-stage2.sh
-  echo "--- Entering chroot & running stage2 ---"
+}
+
+# ── Stage 5: Chroot config & customization ───────────
+configure_chroot() {
+  echo "--- Copy DNS into chroot ---"
+  cp /etc/resolv.conf /mnt/etc/resolv.conf
+
+  echo "--- fstab generation ---"
+  genfstab -U /mnt >> /mnt/etc/fstab
+
+  write_vars
+  write_chroot_script
+
+  echo "--- Running stage2 in chroot ---"
   arch-chroot /mnt /nemesis-stage2.sh
 }
 
-# ── Stage 5: Cleanup ─────────────────────────────────
+# ── Stage 6: Cleanup ─────────────────────────────────
 cleanup() {
   echo "--- Final sync & unmount ---"
   sync
-  swapoff /mnt/swapfile &>/dev/null || true
-  umount -R /mnt || echo "Warning: /mnt still busy"
-  echo "=== Install finished: $(date) ==="
+  umount -R /mnt || echo "/mnt busy"
+  echo "=== Install complete: $(date) ==="
 }
 
 # ── Main ─────────────────────────────────────────────
 prepare_disk
-setup_swap
 install_base
 configure_chroot
 cleanup
