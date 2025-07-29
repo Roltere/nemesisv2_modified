@@ -9,8 +9,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ── Defaults & CLI flags ───────────────────────────────
-hostname="arch-vm"
-username="user"
+hostname="main"
+username="main"
 password="Ch4ngeM3!"
 swap_size="4G"
 filesystem="ext4"
@@ -89,7 +89,6 @@ prepare_disk() {
     disk2="${disk}2"
   fi
 
-  echo "EFI -> $disk1, root -> $disk2"
   mkdir -p /mnt /mnt/boot
   echo "--- Formatting partitions ---"
   if [[ -d /sys/firmware/efi/efivars ]]; then
@@ -120,16 +119,20 @@ install_base() {
     echo "Ranking mirrors..."
     timeout 120 reflector --protocol https --latest 20 \
       --sort rate --connection-timeout 10 \
-      --download-timeout 30 --save /etc/pacman.d/mirrorlist || 
+      --download-timeout 30 --save /etc/pacman.d/mirrorlist || \
       echo "Warning: reflector failed"
   else
     echo "Warning: reflector not installed"
   fi
 
-  echo "--- Installing base system (with go) ---"
-  local pkgs=(base linux linux-firmware sudo base-devel go 
-    networkmanager systemd-resolvconf openssh git neovim tmux 
-    wget p7zip noto-fonts ttf-noto-nerd fish less ldns)
+  echo "--- Installing base system ---"
+  local pkgs=(base linux linux-firmware sudo base-devel go dhclient
+    networkmanager systemd-resolvconf openssh git neovim tmux
+    wget p7zip noto-fonts ttf-noto-nerd fish less ldns bash-completion
+    man-pages man-db pacman-contrib linux-headers intel-ucode dosfstools
+    exfat-utils ntfs-3g smartmontools hdparm nmap net-tools curl httpie rsync
+    cmake make gcc clang python python-pip nodejs npm docker docker-compose
+    htop atop iotop dstat pavucontrol vlc ffmpeg gimp)
   local retries=3
   for i in $(seq 1 $retries); do
     if pacstrap -K /mnt "${pkgs[@]}"; then
@@ -144,6 +147,9 @@ install_base() {
 
 # ── Stage 4: Chroot config ────────────────────────────
 configure_chroot() {
+  echo "--- Copy DNS config into chroot ---"
+  cp /etc/resolv.conf /mnt/etc/resolv.conf
+
   echo "--- Generating fstab & swap entry ---"
   genfstab -U /mnt >> /mnt/etc/fstab
   echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
@@ -154,8 +160,8 @@ configure_chroot() {
 set -euo pipefail
 trap 'echo "Error on line \$LINENO"; exit 1' ERR
 
-# Ensure environment
-export MAKEPKG_ALLOW_ROOT=1
+# Ensure DNS
+cp /etc/resolv.conf /etc/resolv.conf
 
 # Variables
 hostname="$hostname"
@@ -176,20 +182,15 @@ cat > /etc/hosts <<HOSTS
 ::1         localhost
 127.0.1.1   \$hostname.localdomain \$hostname
 HOSTS
-rm -f /etc/resolv.conf
-ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-systemctl enable systemd-resolved NetworkManager
 
-# Config pacman
+# Enable networking early
+systemctl enable systemd-resolved NetworkManager
+systemctl start systemd-resolved NetworkManager
+
+# Pacman config
 sed -i '/#\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
 
-# BlackArch
-if ping -c1 blackarch.org &>/dev/null; then
-  curl -O https://blackarch.org/strap.sh
-  if [[ -s strap.sh ]]; then chmod +x strap.sh&&./strap.sh; fi
-fi
-
-# Update system
+# Upgrade system
 pacman --noconfirm -Syu
 
 # Initramfs
@@ -199,10 +200,9 @@ mkinitcpio -P
 
 # Users
 useradd -m -G wheel -s /usr/bin/fish "\$username"
-echo -e "\$password
-\$password"|passwd "\$username"
+echo -e "\$password\n\$password" | passwd "\$username"
 chage -d 0 "\$username"
-echo "%wheel ALL=(ALL) ALL">>/etc/sudoers
+echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
 # Bootloader
 echo "Installing GRUB..."
@@ -216,12 +216,13 @@ else
   grub-mkconfig -o /boot/grub/grub.cfg
 fi
 
-# Services
-systemctl enable sshd
-if lspci|grep -iq vmware;then
-  pacman --noconfirm -S open-vm-tools
-  systemctl enable vmtoolsd vmware-vmblock-fuse vgauth.service vmhgfs-fuse.service
-fi
+# Enable core services
+systemctl enable NetworkManager.service
+systemctl enable systemd-resolved.service
+systemctl enable sshd.service
+systemctl enable docker.service
+systemctl enable smartd.service
+systemctl enable gdm.service
 
 # AUR helper (yay) as user
 echo "--- Installing yay as \$username ---"
