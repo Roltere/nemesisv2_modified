@@ -57,7 +57,7 @@ prepare_disk() {
   umount -R /mnt 2>/dev/null || true
 
   if [[ -z "$disk" ]]; then
-    disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/"$1; exit}')
+    disk=$(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/" $1; exit}')
   fi
   [[ -b "$disk" ]] || die "Block device '$disk' not found!"
   echo "Using disk: $disk"
@@ -113,29 +113,36 @@ setup_swap() {
 
 # ── Stage 3: Base install ────────────────────────────
 install_base() {
-  echo "--- Setting up mirrors ---"
-  # Ensure community & multilib repos are enabled
-  sed -i '/^\[community\]/,/^Include/ s/^#//' /etc/pacman.conf
-  sed -i '/^\[multilib\]/,/^Include/ s/^#//' /etc/pacman.conf
+  echo "--- Setting up mirrors & enabling repos ---"
+  # Ensure community & multilib are enabled
+  sed -i 's@^[[:space:]]*#\s*\[community\]@[community]@' /etc/pacman.conf
+  sed -i 's@^[[:space:]]*#\s*Include = /etc/pacman.d/community-mirrorlist@Include = /etc/pacman.d/community-mirrorlist@' /etc/pacman.conf
+  sed -i 's@^[[:space:]]*#\s*\[multilib\]@[multilib]@' /etc/pacman.conf
+  sed -i 's@^[[:space:]]*#\s*Include = /etc/pacman.d/multilib-mirrorlist@Include = /etc/pacman.d/multilib-mirrorlist@' /etc/pacman.conf
+
   pacman --noconfirm -Sy || die "Failed to sync pacman databases"
+
+  # Rank mirrors if reflector available
   if pacman --noconfirm -S --needed reflector; then
     echo "Ranking mirrors..."
     timeout 120 reflector --protocol https --latest 20 \
       --sort rate --connection-timeout 10 \
-      --download-timeout 30 --save /etc/pacman.d/mirrorlist || echo "Warning: reflector failed"
-  else
-    echo "Warning: reflector not installed"
+      --download-timeout 30 --save /etc/pacman.d/mirrorlist \
+      || echo "Warning: reflector failed"
   fi
 
-  echo "--- Installing base system ---"
-  local pkgs=(base linux linux-firmware sudo base-devel go dhcpcd
-  networkmanager systemd-resolvconf openssh git neovim tmux
-  wget p7zip noto-fonts fish less ldns bash-completion
-  man-pages man-db pacman-contrib linux-headers intel-ucode
-  dosfstools exfat-utils ntfs-3g smartmontools hdparm
-  nmap net-tools curl httpie rsync cmake make gcc clang
-  python python-pip nodejs npm docker docker-compose
-  htop atop iotop dstat pavucontrol vlc ffmpeg gimp kitty terminator)
+  echo "--- Installing base system packages ---"
+  local pkgs=(
+    base linux linux-firmware sudo base-devel go dhcpcd
+    networkmanager systemd-resolvconf openssh git neovim tmux
+    wget p7zip noto-fonts fish less ldns bash-completion
+    man-pages man-db pacman-contrib linux-headers intel-ucode
+    dosfstools exfat-utils ntfs-3g smartmontools hdparm
+    nmap net-tools curl httpie rsync cmake make gcc clang
+    python python-pip nodejs npm docker docker-compose
+    htop atop iotop dstat pavucontrol vlc ffmpeg gimp
+    kitty terminator
+  )
   local retries=3
   for i in $(seq 1 $retries); do
     if pacstrap -K /mnt "${pkgs[@]}"; then
@@ -167,8 +174,8 @@ trap 'echo "Error on line \$LINENO"; exit 1' ERR
 cp /etc/resolv.conf /etc/resolv.conf
 
 # Variables
-hostname="$hostname"
-username="$username"
+hostname="main"
+username="main"
 password="$password"
 
 # Time & locale
@@ -203,8 +210,7 @@ mkinitcpio -P
 
 # Users
 useradd -m -G wheel -s /usr/bin/fish "\$username"
-echo -e "\$password
-\$password" | passwd "\$username"
+echo -e "\$password\n\$password" | passwd "\$username"
 chage -d 0 "\$username"
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
