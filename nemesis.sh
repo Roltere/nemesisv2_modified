@@ -112,8 +112,9 @@ install_base() {
     dosfstools exfat-utils ntfs-3g smartmontools hdparm
     nmap net-tools curl httpie rsync cmake make gcc clang
     python python-pip nodejs npm docker docker-compose
-    htop atop iotop dstat pavucontrol vlc ffmpeg gimp
+    htop atop iotop pavucontrol vlc ffmpeg gimp
     kitty terminator open-vm-tools gtkmm3
+    # dstat  <--- removed
   )
   local retries=3
   for i in $(seq 1 $retries); do
@@ -126,6 +127,7 @@ install_base() {
     fi
   done
 }
+
 
 # ── Stage 3: Write install vars for chroot ───────────
 write_vars() {
