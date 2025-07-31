@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOGFILE="/tmp/install.log"
+LOGFILE="${LOGFILE:-/root/install.log}"
 
 log() {
     local msg="[$(date '+%F %T')] $*"
