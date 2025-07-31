@@ -22,4 +22,11 @@ echo "$USERNAME:$PASSWORD" | chpasswd
 log "Enabling sudo for wheel group"
 sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
+log "Ensuring mkinitcpio.conf has lvm2 hook"
+sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block lvm2 filesystems keyboard fsck)/' /etc/mkinitcpio.conf
+
+log "Regenerating initramfs"
+mkinitcpio -P
+
+
 checkpoint "User setup complete"
