@@ -73,7 +73,7 @@ checkpoint "Disk setup complete"
 # Pacstrap base system
 checkpoint "Installing base system"
 pacman --noconfirm -Sy archlinux-keyring
-pacstrap /mnt base linux linux-firmware lvm2
+pacstrap /mnt base linux linux-firmware lvm2 networkmanager
 
 log "Generating fstab"
 genfstab -U /mnt >> /mnt/etc/fstab
