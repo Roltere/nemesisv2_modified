@@ -2,10 +2,21 @@
 set -euo pipefail
 source /root/logging.sh
 
+install_pacman_tools() {
+    local tool
+    for tool in "$@"; do
+        if pacman --noconfirm -S "$tool"; then
+            log "Successfully installed $tool"
+        else
+            log "WARNING: Failed to install $tool"
+        fi
+    done
+}
+
 checkpoint "Gnome desktop and theming"
 
 log "Installing Gnome and extras"
-pacman --noconfirm -Syu gnome gnome-tweaks kitty thunar firefox pipewire
+install_pacman_tools gnome gnome-tweaks kitty thunar firefox pipewire
 
 log "Enabling GDM"
 systemctl enable gdm
@@ -13,8 +24,8 @@ systemctl enable gdm
 log "Applying Gnome settings (keyboard, fonts, etc)"
 sudo -u "$USERNAME" dbus-launch --exit-with-session gsettings set org.gnome.desktop.input-sources sources "[(\"xkb\", \"gb\")]"
 
-log "Installing noto fonts and neofetch"
-pacman --noconfirm -S noto-fonts ttf-noto-nerd neofetch
+log "Installing noto fonts and fastfetch"
+install_pacman_tools noto-fonts ttf-noto-nerd fastfetch
 
 log "Downloading wallpaper"
 mkdir -p /home/"$USERNAME"/Pictures
