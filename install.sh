@@ -5,6 +5,7 @@ set -euo pipefail
 source ./lib/logging.sh
 
 checkpoint "Starting Nemesis modular install..."
+chmod +x ./lib/*
 
 source ./lib/base.sh
 source ./lib/disk.sh
