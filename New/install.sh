@@ -1,77 +1,113 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-chmod +x ./lib/base.sh ./lib/desktop.sh ./lib/disk.sh ./lib/logging.sh ./lib/users.sh ./lib/vmware.sh
-
 export LOGFILE="/tmp/install.log"
 rm -f "$LOGFILE"
 
-source ./lib/logging.sh
+# Minimal configuration (edit as needed)
+HOSTNAME="main"
+USERNAME="main"
+PASSWORD="changeme"
 
-log "Starting Arch-Nemesis modular install..."
+# Function for logging
+log() {
+    local msg="[$(date '+%F %T')] $*"
+    echo -e "$msg" | tee -a "$LOGFILE"
+}
+
+checkpoint() {
+    log "=== CHECKPOINT: $* ==="
+}
+
+fail() {
+    log "ERROR: $*"
+    exit 1
+}
+
+trap 'fail "An unexpected error occurred at line $LINENO."' ERR
+
+log "Starting Arch-Nemesis modular VM install..."
 checkpoint "Configuration check"
 
-# Configuration (edit as needed)
-HOSTNAME="DESKTOP-IJ0CNHN"
-USERNAME="user"
-PASSWORD="Ch4ngeM3!"
-LUKS_PASSWORD="1234567890"
-VM=true
+# Set keyboard layout early for UK
+loadkeys uk
 
-export HOSTNAME USERNAME PASSWORD LUKS_PASSWORD VM
+# Disk/partition/lvm setup (no LUKS)
+DISK="/dev/sda"
+checkpoint "Partitioning and disk setup"
 
-# Load and execute modules for stage 1
-for module in lib/disk.sh lib/base.sh; do
-    checkpoint "Running module: $(basename "$module")"
-    if [[ -f $module ]]; then
-        bash "$module"
-    else
-        fail "Module $module not found!"
-    fi
-done
+umount -f -l /mnt || true
+swapoff -a || true
+vgchange -a n lvgroup || true
 
-checkpoint "Copying stage2 modules into new system"
+log "Partitioning $DISK"
+echo "label: gpt" | sfdisk --no-reread --force "$DISK"
+sfdisk --no-reread --force "$DISK" <<EOF
+,512M,U,*
+;
+EOF
 
-# Copy logging utility and stage2 modules into chroot
+DISKPART1="${DISK}1"
+DISKPART2="${DISK}2"
+
+log "Formatting EFI partition"
+mkfs.fat -F32 "$DISKPART1"
+
+log "Setting up LVM"
+pvcreate -ffy "$DISKPART2"
+vgcreate lvgroup "$DISKPART2"
+lvcreate -y -L 4G lvgroup -n swap
+lvcreate -y -l 100%FREE lvgroup -n root
+
+log "Formatting LVM and mounting"
+mkfs.ext4 -F /dev/lvgroup/root
+mkswap /dev/lvgroup/swap
+mount /dev/lvgroup/root /mnt
+swapon /dev/lvgroup/swap
+
+mkdir -p /mnt/boot
+mount "$DISKPART1" /mnt/boot
+
+checkpoint "Disk setup complete"
+
+# Pacstrap base system
+checkpoint "Installing base system"
+pacman --noconfirm -Sy archlinux-keyring
+pacstrap /mnt base linux linux-firmware lvm2
+
+log "Generating fstab"
+genfstab -U /mnt >> /mnt/etc/fstab
+
+checkpoint "Base system ready"
+
+# Copy chroot modules (make sure these files exist!)
+checkpoint "Copying chroot scripts"
 for file in lib/logging.sh lib/users.sh lib/desktop.sh lib/vmware.sh lib/bootloader.sh; do
     cp "$file" "/mnt/root/$(basename "$file")"
 done
 
-# Create a single stage2 orchestrator
-cat <<'EOF' >/mnt/root/nemesis-stage2.sh
+# Orchestrator for chrooted stage2
+cat <<EOF >/mnt/root/nemesis-stage2.sh
 #!/usr/bin/env bash
 set -euo pipefail
 export LOGFILE="/root/install.log"
+export HOSTNAME="$HOSTNAME"
+export USERNAME="$USERNAME"
+export PASSWORD="$PASSWORD"
 source /root/logging.sh
-
-install_pacman_tools() {
-    local tool
-    for tool in "$@"; do
-        if pacman --noconfirm -S "$tool"; then
-            log "Successfully installed $tool"
-        else
-            log "WARNING: Failed to install $tool"
-        fi
-    done
-}
 
 checkpoint "Beginning Stage 2 (chrooted post-install)"
 
 for module in /root/users.sh /root/desktop.sh /root/vmware.sh /root/bootloader.sh; do
-    checkpoint "Running $(basename "$module") in chroot"
-    bash "$module"
+    checkpoint "Running \$(basename "\$module") in chroot"
+    bash "\$module"
 done
 
-
 log "Stage 2 (chroot) complete. You may reboot."
-
 EOF
-
 chmod +x /mnt/root/nemesis-stage2.sh
 
 checkpoint "Entering chroot for Stage 2 setup"
-
-# Run the chrooted stage2 automatically (all output to install.log)
 arch-chroot /mnt bash /root/nemesis-stage2.sh | tee -a "$LOGFILE"
 
-log "Arch-Nemesis install complete. You may reboot now. Full log at $LOGFILE"
+log "Arch-Nemesis VM install complete. You may reboot now. See $LOGFILE for full log."
