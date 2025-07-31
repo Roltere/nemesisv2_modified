@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+chmod +x ./lib/base.sh ./lib/desktop.sh ./lib/disk.sh ./lib/logging.sh ./lib/users.sh ./lib/vmware.sh
+
 export LOGFILE="/tmp/install.log"
 rm -f "$LOGFILE"
 
