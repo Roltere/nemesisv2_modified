@@ -42,6 +42,17 @@ set -euo pipefail
 export LOGFILE="/root/install.log"
 source /root/logging.sh
 
+install_pacman_tools() {
+    local tool
+    for tool in "$@"; do
+        if pacman --noconfirm -S "$tool"; then
+            log "Successfully installed $tool"
+        else
+            log "WARNING: Failed to install $tool"
+        fi
+    done
+}
+
 checkpoint "Beginning Stage 2 (chrooted post-install)"
 
 for module in /root/users.sh /root/desktop.sh /root/vmware.sh; do
