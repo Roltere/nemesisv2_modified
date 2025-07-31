@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+chmod +x lib/*
 export LOGFILE="/tmp/install.log"
 rm -f "\$LOGFILE"
 
@@ -50,7 +51,7 @@ mount "\$DISKPART1" /mnt/boot
 
 checkpoint "Disk setup complete"
 
-# Pacstrap — all essentials included!
+# Pacstrap â€” all essentials included!
 checkpoint "Installing base system"
 pacman --noconfirm -Sy archlinux-keyring
 pacstrap /mnt base linux linux-firmware lvm2 sudo networkmanager grub efibootmgr nano
