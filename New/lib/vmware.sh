@@ -23,4 +23,3 @@ systemctl enable vmware-vmblock-fuse || log "WARNING: Could not enable vmware-vm
 
 checkpoint "VMware guest tools setup complete"
 
-
