@@ -40,7 +40,6 @@ cat <<'EOF' >/mnt/root/nemesis-stage2.sh
 #!/usr/bin/env bash
 set -euo pipefail
 export LOGFILE="/root/install.log"
-
 source /root/logging.sh
 
 checkpoint "Beginning Stage 2 (chrooted post-install)"
@@ -51,6 +50,7 @@ for module in /root/users.sh /root/desktop.sh /root/vmware.sh; do
 done
 
 log "Stage 2 (chroot) complete. You may reboot."
+
 EOF
 
 chmod +x /mnt/root/nemesis-stage2.sh
