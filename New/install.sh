@@ -33,7 +33,7 @@ done
 checkpoint "Copying stage2 modules into new system"
 
 # Copy logging utility and stage2 modules into chroot
-for file in lib/logging.sh lib/users.sh lib/desktop.sh lib/vmware.sh; do
+for file in lib/logging.sh lib/users.sh lib/desktop.sh lib/vmware.sh lib/bootloader.sh; do
     cp "$file" "/mnt/root/$(basename "$file")"
 done
 
@@ -57,10 +57,11 @@ install_pacman_tools() {
 
 checkpoint "Beginning Stage 2 (chrooted post-install)"
 
-for module in /root/users.sh /root/desktop.sh /root/vmware.sh; do
+for module in /root/users.sh /root/desktop.sh /root/vmware.sh /root/bootloader.sh; do
     checkpoint "Running $(basename "$module") in chroot"
     bash "$module"
 done
+
 
 log "Stage 2 (chroot) complete. You may reboot."
 
