@@ -4,8 +4,8 @@ set -euo pipefail
 export LOGFILE="/tmp/install.log"
 rm -f "$LOGFILE"
 
-HOSTNAME="archnemesis-vm"
-USERNAME="user"
+HOSTNAME="main"
+USERNAME="main"
 PASSWORD="changeme"
 
 log() { local msg="[$(date '+%F %T')] $*"; echo -e "$msg" | tee -a "$LOGFILE"; }
