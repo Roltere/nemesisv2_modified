@@ -1,21 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-<<<<<<< HEAD
-# --- Outside chroot: Partition, format, mount, pacstrap
-source ./lib/logging.sh
-source ./lib/base.sh
-source ./lib/disk.sh
-
-# --- Copy chroot modules and execute them IN ORDER ---
-for script in bootloader.sh users.sh desktop.sh vmware.sh; do
-    echo ">>> Running $script inside chroot"
-    cp "./lib/$script" "/mnt/$script"
-    arch-chroot /mnt bash "/$script"
-    rm "/mnt/$script"
-done
-
-=======
 # Load configuration
 if [ -f "./config.sh" ]; then
     source ./config.sh
@@ -184,6 +169,4 @@ echo ""
 if [[ -f /tmp/nemesis-install.log ]]; then
     echo "Installation log: /tmp/nemesis-install.log"
 fi
-
->>>>>>> d355b03 (Changing file structure)
 checkpoint "All install modules completed in correct order."

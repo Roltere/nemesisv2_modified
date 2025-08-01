@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-<<<<<<< HEAD
-log() { echo "[${0##*/}] $*"; }
-checkpoint() { echo "=== CHECKPOINT: $* ==="; }
-=======
 
 # Progress tracking variables
 TOTAL_STEPS=0
@@ -101,4 +97,3 @@ monitor_performance() {
         log "Performance: Load=$load, Memory=${mem_used}%, Disk=${disk_used}%"
     fi
 }
->>>>>>> d355b03 (Changing file structure)

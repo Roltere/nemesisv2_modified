@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-<<<<<<< HEAD
-USERNAME="main"
-PASSWORD="password"
-log "Adding user $USERNAME..."
-arch-chroot /mnt bash -c "
-  useradd -m -G wheel,users $USERNAME
-  echo '$USERNAME:$PASSWORD' | chpasswd
-  echo '%wheel ALL=(ALL) ALL' >> /etc/sudoers
-"
-=======
 
 # Use configuration variables or defaults
 USERNAME="${USERNAME:-main}"
@@ -35,6 +25,4 @@ fi
 
 # Set up user shell
 chsh -s /bin/bash "$USERNAME"
-
->>>>>>> d355b03 (Changing file structure)
 checkpoint "User creation complete"

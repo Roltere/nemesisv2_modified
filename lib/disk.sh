@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-<<<<<<< HEAD
-log "Detecting target disk..."
-DISK="/dev/sda"
-=======
 
 detect_disk() {
     log "Auto-detecting installation disk..."
@@ -55,7 +51,6 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 log "Using disk: $DISK"
->>>>>>> d355b03 (Changing file structure)
 log "Unmounting previous mounts if any..."
 umount -R /mnt || true
 log "Partitioning $DISK (GPT, EFI+root)..."
