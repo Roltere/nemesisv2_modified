@@ -47,9 +47,11 @@ detect_disk() {
 
 setup_disk() {
     log "Detecting target disk..."
-    DISK=$(detect_disk)
-    if [ $? -ne 0 ]; then
-        exit 1
+    if ! DISK=$(detect_disk); then
+        log "FATAL: Disk detection failed. Available disks:"
+        lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
+        log "Please set TARGET_DISK environment variable or ensure a suitable disk is available"
+        return 1
     fi
     log "Using disk: $DISK"
     log "Unmounting previous mounts if any..."
