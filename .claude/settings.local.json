@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash:*)",
+      "Bash(for:*)",
+      "Bash(do echo \"Checking $file:\")",
+      "Bash(echo:*)",
+      "Bash(done)",
+      "Bash(git add:*)"
+    ],
+    "deny": []
+  }
+}

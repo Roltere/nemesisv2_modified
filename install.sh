@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Load logging functions first
+source ./lib/logging.sh
+
 # Load configuration
 if [ -f "./config.sh" ]; then
     source ./config.sh
@@ -21,8 +24,10 @@ if ! validate_config; then
 fi
 
 # --- Pre-flight checks and error recovery setup ---
-source ./lib/logging.sh
 source ./lib/preflight.sh
+
+# Load disk detection functions early for display
+source ./lib/disk.sh
 
 setup_error_handling
 
@@ -77,21 +82,29 @@ log "Starting Nemesis Arch installation..."
 # --- Outside chroot: Partition, format, mount, pacstrap ---
 if [[ "$RESUME_STATE" == "START" ]]; then
     progress "Setting up disk partitions and filesystem..."
-    source ./lib/disk.sh
+    setup_disk
     save_state "DISK_SETUP"
 fi
 
 if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" ]]; then
     progress "Installing base system packages..."
     source ./lib/base.sh
+    setup_base_system
     save_state "BASE_INSTALL"
+fi
+
+if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" || "$RESUME_STATE" == "BASE_INSTALL" ]]; then
+    progress "Installing kernel and bootloader packages..."
+    source ./lib/bootloader.sh
+    # This will call install_base_packages (outside chroot)
+    save_state "PACKAGES_INSTALLED"
 fi
 
 # --- Copy chroot modules and execute them IN ORDER ---
 chroot_scripts=()
 
-# Always run bootloader and users
-if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" || "$RESUME_STATE" == "BASE_INSTALL" ]]; then
+# Always run bootloader config and users
+if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" || "$RESUME_STATE" == "BASE_INSTALL" || "$RESUME_STATE" == "PACKAGES_INSTALLED" ]]; then
     chroot_scripts+=("bootloader.sh" "users.sh")
 fi
 
@@ -136,7 +149,23 @@ for script in "${chroot_scripts[@]}"; do
         cp "./lib/desktop-selector.sh" "/mnt/desktop-selector.sh"
     fi
     
-    arch-chroot /mnt bash "/$script"
+    arch-chroot /mnt bash -c "
+        export CHROOT_MODE=yes
+        export USERNAME='${USERNAME:-main}'
+        export USER_PASSWORD='${USER_PASSWORD:-}'
+        export USER_GROUPS='${USER_GROUPS:-wheel,users}'
+        export HOSTNAME='${HOSTNAME:-nemesis-host}'
+        export TIMEZONE='${TIMEZONE:-UTC}'
+        export LOCALE='${LOCALE:-en_US.UTF-8}'
+        export KEYMAP='${KEYMAP:-us}'
+        export DESKTOP_ENV='${DESKTOP_ENV:-gnome}'
+        export INSTALL_THEMES='${INSTALL_THEMES:-yes}'
+        export DOWNLOAD_WALLPAPER='${DOWNLOAD_WALLPAPER:-yes}'
+        export INSTALL_DEV_TOOLS='${INSTALL_DEV_TOOLS:-no}'
+        export INSTALL_MEDIA_CODECS='${INSTALL_MEDIA_CODECS:-yes}'
+        export OPTIMIZE_FOR_VM='${OPTIMIZE_FOR_VM:-auto}'
+        bash /$script
+    "
     rm "/mnt/$script"
     
     # Clean up dependencies
