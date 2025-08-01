@@ -2,11 +2,20 @@
 
 # This function runs outside chroot
 install_base_packages() {
+    log "Checking space before pacstrap..."
+    df -h / /tmp /mnt 2>/dev/null || true
+    
     log "Installing bootloader and kernel..."
     if ! pacstrap /mnt grub efibootmgr linux linux-firmware; then
         log "ERROR: Failed to install essential packages"
+        log "Space check after pacstrap failure:"
+        df -h / /tmp /mnt 2>/dev/null || true
         exit 1
     fi
+    
+    log "Space check after successful pacstrap:"
+    df -h / /tmp /mnt 2>/dev/null || true
+    
     log "Generating fstab..."
     genfstab -U /mnt >> /mnt/etc/fstab
     checkpoint "Base system packages installed"

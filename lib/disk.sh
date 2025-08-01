@@ -54,6 +54,15 @@ setup_disk() {
         return 1
     fi
     log "Using disk: $DISK"
+    
+    # Show disk information before partitioning
+    log "Disk information before partitioning:"
+    lsblk "$DISK" || true
+    fdisk -l "$DISK" 2>/dev/null || true
+    
+    log "Available space check:"
+    df -h / /tmp 2>/dev/null || true
+    
     log "Unmounting previous mounts if any..."
     umount -R /mnt || true
     log "Partitioning $DISK (GPT, EFI+root)..."
@@ -68,5 +77,11 @@ setup_disk() {
     mount "${DISK}2" /mnt
     mkdir -p /mnt/boot
     mount "${DISK}1" /mnt/boot
+    
+    # Show mounted filesystem information
+    log "Mounted filesystem information:"
+    df -h /mnt /mnt/boot 2>/dev/null || true
+    lsblk "$DISK" || true
+    
     checkpoint "Disk partitioning and mount complete"
 }
