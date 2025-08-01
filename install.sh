@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Temporarily disable -e for debugging
 set -uo pipefail
+
+# Redirect output to both screen and log file
+exec > >(tee /tmp/install-debug.log)
+exec 2>&1
+
 echo "DEBUG: Script starting with debugging enabled"
+echo "DEBUG: Output is being logged to /tmp/install-debug.log"
 
 # Load logging functions first
 source ./lib/logging.sh
