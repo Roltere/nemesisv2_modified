@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+<<<<<<< HEAD
 source /root/logging.sh
+=======
+source ./logging.sh
+source ./desktop-selector.sh
+
+>>>>>>> d355b03 (Changing file structure)
 install_pacman_tools() {
     local tool
     for tool in "$@"; do
@@ -11,6 +17,7 @@ install_pacman_tools() {
         fi
     done
 }
+<<<<<<< HEAD
 checkpoint "Installing GNOME and KDE Plasma desktop environments"
 install_pacman_tools gnome gnome-tweaks kitty thunar firefox pipewire
 install_pacman_tools plasma kde-applications sddm plasma-workspace-x11 xorg xorg-xinit xterm
@@ -60,3 +67,8 @@ chown -R "\$USERNAME:\$USERNAME" /home/"\$USERNAME"/.local/share
 chown -R "\$USERNAME:\$USERNAME" /home/"\$USERNAME"/.config
 chown "\$USERNAME:\$USERNAME" /home/"\$USERNAME"/Pictures/wallpaper.png
 checkpoint "Desktop environments and theming setup complete"
+=======
+
+# Use the new modular desktop installation
+install_desktop_environment
+>>>>>>> d355b03 (Changing file structure)

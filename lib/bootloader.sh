@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 log "Installing bootloader and kernel..."
+<<<<<<< HEAD
 pacstrap /mnt grub efibootmgr linux linux-firmware
+=======
+if ! pacstrap /mnt grub efibootmgr linux linux-firmware; then
+    log "ERROR: Failed to install essential packages"
+    exit 1
+fi
+>>>>>>> d355b03 (Changing file structure)
 log "Generating fstab..."
 genfstab -U /mnt >> /mnt/etc/fstab
 log "Chrooting and configuring bootloader..."
