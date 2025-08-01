@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Temporarily disable -e for debugging
+set -uo pipefail
+echo "DEBUG: Script starting with debugging enabled"
 
 # Load logging functions first
 source ./lib/logging.sh
@@ -81,9 +83,19 @@ log "Starting Nemesis Arch installation..."
 
 # --- Outside chroot: Partition, format, mount, pacstrap ---
 if [[ "$RESUME_STATE" == "START" ]]; then
+    echo "DEBUG: About to start disk setup"
     progress "Setting up disk partitions and filesystem..."
-    setup_disk
-    save_state "DISK_SETUP"
+    echo "DEBUG: Calling setup_disk function"
+    
+    if setup_disk; then
+        echo "DEBUG: setup_disk completed successfully"
+        save_state "DISK_SETUP"
+        echo "DEBUG: Saved DISK_SETUP state"
+    else
+        echo "ERROR: setup_disk failed with exit code $?"
+        exit 1
+    fi
+    echo "DEBUG: Disk setup phase completed"
 fi
 
 if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" ]]; then

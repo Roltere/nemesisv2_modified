@@ -65,18 +65,65 @@ setup_disk() {
     
     log "Unmounting previous mounts if any..."
     umount -R /mnt || true
+    
+    echo "DEBUG: About to start partitioning $DISK"
     log "Partitioning $DISK (GPT, EFI+root)..."
-    parted -s "$DISK" mklabel gpt
-    parted -s "$DISK" mkpart ESP fat32 1MiB 301MiB
-    parted -s "$DISK" set 1 esp on
-    parted -s "$DISK" mkpart primary ext4 301MiB 100%
+    
+    if ! parted -s "$DISK" mklabel gpt; then
+        log "ERROR: Failed to create GPT label on $DISK"
+        return 1
+    fi
+    echo "DEBUG: GPT label created successfully"
+    
+    if ! parted -s "$DISK" mkpart ESP fat32 1MiB 301MiB; then
+        log "ERROR: Failed to create EFI partition"
+        return 1
+    fi
+    echo "DEBUG: EFI partition created"
+    
+    if ! parted -s "$DISK" set 1 esp on; then
+        log "ERROR: Failed to set ESP flag"
+        return 1
+    fi
+    echo "DEBUG: ESP flag set"
+    
+    if ! parted -s "$DISK" mkpart primary ext4 301MiB 100%; then
+        log "ERROR: Failed to create root partition"
+        return 1
+    fi
+    echo "DEBUG: Root partition created"
+    
     log "Formatting partitions..."
-    mkfs.fat -F32 "${DISK}1"
-    mkfs.ext4 -F "${DISK}2"
+    if ! mkfs.fat -F32 "${DISK}1"; then
+        log "ERROR: Failed to format EFI partition"
+        return 1
+    fi
+    echo "DEBUG: EFI partition formatted"
+    
+    if ! mkfs.ext4 -F "${DISK}2"; then
+        log "ERROR: Failed to format root partition"
+        return 1
+    fi
+    echo "DEBUG: Root partition formatted"
     log "Mounting partitions..."
-    mount "${DISK}2" /mnt
-    mkdir -p /mnt/boot
-    mount "${DISK}1" /mnt/boot
+    
+    if ! mount "${DISK}2" /mnt; then
+        log "ERROR: Failed to mount root partition"
+        return 1
+    fi
+    echo "DEBUG: Root partition mounted"
+    
+    if ! mkdir -p /mnt/boot; then
+        log "ERROR: Failed to create /mnt/boot directory"
+        return 1
+    fi
+    echo "DEBUG: /mnt/boot directory created"
+    
+    if ! mount "${DISK}1" /mnt/boot; then
+        log "ERROR: Failed to mount EFI partition"
+        return 1
+    fi
+    echo "DEBUG: EFI partition mounted"
     
     # Show mounted filesystem information
     log "Mounted filesystem information:"
