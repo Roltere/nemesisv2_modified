@@ -24,7 +24,9 @@ detect_disk() {
     
     # Find the first available disk with sufficient size (>= 8GB)
     for disk in "${disk_candidates[@]}"; do
+        log "Checking disk candidate: $disk"
         if [ -b "$disk" ]; then
+            log "Device $disk exists as block device"
             local size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || echo "0")
             local size_gb=$((size_bytes / 1024 / 1024 / 1024))
             
@@ -35,10 +37,30 @@ detect_disk() {
             else
                 log "Disk $disk too small (${size_gb}GB < 8GB required)"
             fi
+        else
+            log "Device $disk does not exist or is not a block device"
         fi
     done
     
-    # If no standard disks found, list available block devices
+    # If no standard disks found, try to find ANY available disk
+    log "No standard disk found, searching for any suitable disk..."
+    local found_disks=$(lsblk -d -n -o NAME,SIZE | grep -v loop | grep -v sr | head -5)
+    log "Found block devices: $found_disks"
+    
+    # Try to find a suitable disk from lsblk output
+    while read -r name size; do
+        local disk="/dev/$name"
+        if [ -b "$disk" ]; then
+            local size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || echo "0")
+            local size_gb=$((size_bytes / 1024 / 1024 / 1024))
+            if [ "$size_gb" -ge 8 ]; then
+                log "Found alternative suitable disk: $disk (${size_gb}GB)"
+                echo "$disk"
+                return 0
+            fi
+        fi
+    done <<< "$found_disks"
+    
     log "No suitable disk found automatically. Available block devices:"
     lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
     log "ERROR: Please set TARGET_DISK environment variable to specify disk"
@@ -54,6 +76,16 @@ setup_disk() {
         return 1
     fi
     log "Using disk: $DISK"
+    
+    # Verify the detected disk is actually accessible
+    if [ ! -b "$DISK" ]; then
+        log "ERROR: Detected disk $DISK is not a valid block device!"
+        log "Available block devices:"
+        ls -la /dev/sd* /dev/nvme* /dev/vd* 2>/dev/null || true
+        lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
+        return 1
+    fi
+    log "Verified disk $DISK is accessible as block device"
     
     # Show disk information before partitioning
     log "Disk information before partitioning:"
