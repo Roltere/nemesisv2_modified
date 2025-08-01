@@ -1,21 +1,5 @@
 #!/usr/bin/env bash
-# Temporarily disable strict error handling for debugging
-set -uo pipefail
-
-# Enable debug mode for troubleshooting
-set -x
-
-# Function to handle errors
-handle_script_error() {
-    local exit_code=$?
-    local line_number=$1
-    echo "ERROR: Script failed at line $line_number with exit code $exit_code"
-    echo "Last command: $BASH_COMMAND"
-    exit $exit_code
-}
-
-# Set up error trap
-trap 'handle_script_error $LINENO' ERR
+set -euo pipefail
 
 # Load logging functions first
 source ./lib/logging.sh
@@ -95,22 +79,11 @@ fi
 
 log "Starting Nemesis Arch installation..."
 
-echo "DEBUG: About to enter disk setup phase"
-echo "DEBUG: RESUME_STATE = $RESUME_STATE"
-
 # --- Outside chroot: Partition, format, mount, pacstrap ---
 if [[ "$RESUME_STATE" == "START" ]]; then
-    echo "DEBUG: Entering disk setup"
     progress "Setting up disk partitions and filesystem..."
-    
-    echo "DEBUG: About to call setup_disk"
-    if setup_disk; then
-        echo "DEBUG: setup_disk completed successfully"
-        save_state "DISK_SETUP"
-    else
-        echo "ERROR: setup_disk failed"
-        exit 1
-    fi
+    setup_disk
+    save_state "DISK_SETUP"
 fi
 
 if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" ]]; then
