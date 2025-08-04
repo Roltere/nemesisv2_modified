@@ -15,7 +15,7 @@ detect_disk() {
     # If TARGET_DISK is set, use it
     if [ -n "${TARGET_DISK:-}" ]; then
         wait_for_devices
-        if [ -e "$TARGET_DISK" ] && ([ -b "$TARGET_DISK" ] || lsblk "$TARGET_DISK" >/dev/null 2>&1); then
+        if fdisk -l "$TARGET_DISK" >/dev/null 2>&1; then
             echo "$TARGET_DISK"
             return 0
         else
@@ -26,83 +26,72 @@ detect_disk() {
     # Wait for devices to be available
     wait_for_devices
     
-    # Get all available block devices dynamically
-    log "Scanning for available block devices..."
-    local all_devices
-    if ! all_devices=$(lsblk -d -n -o NAME,SIZE,TYPE,MODEL 2>/dev/null); then
-        log "ERROR: Cannot enumerate block devices with lsblk"
+    # Use fdisk -l to discover disks (more reliable in early boot than lsblk)
+    log "Scanning for available disks with fdisk..."
+    local fdisk_output
+    if ! fdisk_output=$(fdisk -l 2>/dev/null); then
+        log "ERROR: Cannot run fdisk to enumerate disks"
         return 1
     fi
     
-    log "Available devices:"
-    echo "$all_devices" | while read line; do
-        log "  $line"
+    # Extract disk device paths from fdisk output
+    local available_disks
+    available_disks=$(echo "$fdisk_output" | grep "^Disk /dev/" | grep -o "/dev/[^:]*" | head -10)
+    
+    if [ -z "$available_disks" ]; then
+        log "ERROR: No disks found by fdisk"
+        return 1
+    fi
+    
+    log "Available disks found by fdisk:"
+    echo "$available_disks" | while read disk; do
+        local size_info=$(echo "$fdisk_output" | grep "^Disk $disk:" | sed 's/.*: //')
+        log "  $disk: $size_info"
     done
     
-    # Find suitable disks (exclude unwanted types)
-    local suitable_candidates=()
-    while read -r name size type model; do
-        [ -z "$name" ] && continue
+    # Find first suitable disk
+    while read -r disk; do
+        [ -z "$disk" ] && continue
         
-        local disk="/dev/$name"
+        log "Checking disk candidate: $disk"
         
-        # Skip unwanted device types
-        case "$type" in
-            loop|rom|part) 
-                log "Skipping $disk: type=$type (not suitable for installation)"
-                continue
-                ;;
-        esac
-        
-        # Skip if mounted as system disk
+        # Skip if mounted as system/ISO disk
         if lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso\|^/run/miso"; then
             log "Skipping $disk: currently mounted as system disk or ISO"
             continue
         fi
         
-        # Check size requirement
-        local size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || echo "0")
-        local size_gb=$((size_bytes / 1024 / 1024 / 1024))
+        # Get size from fdisk output
+        local size_line=$(echo "$fdisk_output" | grep "^Disk $disk:")
+        if [ -z "$size_line" ]; then
+            log "Skipping $disk: cannot determine size"
+            continue
+        fi
+        
+        # Extract size in bytes (fdisk shows various formats, try to parse)
+        local size_gb=0
+        if echo "$size_line" | grep -q "GiB\|GB"; then
+            size_gb=$(echo "$size_line" | grep -o '[0-9]*\.*[0-9]*[[:space:]]*GiB\|GB' | grep -o '[0-9]*\.*[0-9]*' | head -1)
+            size_gb=${size_gb%.*}  # Remove decimal part
+        elif echo "$size_line" | grep -q "bytes"; then
+            local bytes=$(echo "$size_line" | grep -o '[0-9]*[[:space:]]*bytes' | grep -o '[0-9]*')
+            size_gb=$((bytes / 1024 / 1024 / 1024))
+        fi
         
         if [ "$size_gb" -lt 8 ]; then
             log "Skipping $disk: too small (${size_gb}GB < 8GB required)"
             continue
         fi
         
-        # Check accessibility
-        if [ -e "$disk" ] && ([ -b "$disk" ] || lsblk "$disk" >/dev/null 2>&1); then
-            log "Found suitable disk candidate: $disk (${size_gb}GB, type=$type, model=${model:-unknown})"
-            suitable_candidates+=("$disk:$size_gb:$type:${model:-unknown}")
-        else
-            log "Disk $disk exists but not accessible"
-        fi
-    done <<< "$all_devices"
-    
-    # If we found suitable candidates, pick the best one
-    if [ ${#suitable_candidates[@]} -gt 0 ]; then
-        # Sort by preference: prefer non-USB, then by size (largest first)
-        local best_disk=""
-        local best_size=0
-        
-        for candidate in "${suitable_candidates[@]}"; do
-            IFS=':' read -r disk size type model <<< "$candidate"
-            
-            # Prefer non-USB devices
-            if [[ ! "$model" =~ [Uu][Ss][Bb] ]] && [ "$size" -gt "$best_size" ]; then
-                best_disk="$disk"
-                best_size="$size"
-            elif [ -z "$best_disk" ]; then
-                best_disk="$disk"
-                best_size="$size"
-            fi
-        done
-        
-        if [ -n "$best_disk" ]; then
-            log "Selected best disk: $best_disk (${best_size}GB)"
-            echo "$best_disk"
+        # Final verification - can we access this disk?
+        if fdisk -l "$disk" >/dev/null 2>&1; then
+            log "Selected suitable disk: $disk (${size_gb}GB)"
+            echo "$disk"
             return 0
+        else
+            log "Skipping $disk: not accessible"
         fi
-    fi
+    done <<< "$available_disks"
     
     log "No suitable disk found automatically. Available block devices:"
     lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
@@ -131,54 +120,17 @@ setup_disk() {
     fi
     log "Using disk: $DISK"
     
-    # Verify the detected disk is actually accessible with multiple methods
-    log "Verifying disk $DISK accessibility..."
+    # Verify the detected disk is accessible using fdisk
+    log "Verifying disk $DISK accessibility with fdisk..."
     
-    # Method 1: Standard block device test
-    if [ ! -b "$DISK" ]; then
-        log "WARNING: $DISK failed standard block device test"
-        
-        # Method 2: Check if device exists and try to access it
-        if [ ! -e "$DISK" ]; then
-            log "ERROR: Device $DISK does not exist"
-            log "Available block devices:"
-            ls -la /dev/sd* /dev/nvme* /dev/vd* 2>/dev/null || true
-            lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
-            return 1
-        fi
-        
-        # Method 3: Try to read device info with udevadm (if available)
-        if command -v udevadm >/dev/null 2>&1; then
-            log "Checking device with udevadm..."
-            if udevadm info --name="$DISK" >/dev/null 2>&1; then
-                log "Device $DISK recognized by udev"
-            else
-                log "WARNING: Device $DISK not recognized by udev"
-            fi
-        fi
-        
-        # Method 4: Try to access with lsblk specifically
-        if lsblk "$DISK" >/dev/null 2>&1; then
-            log "Device $DISK accessible via lsblk - proceeding despite block device test failure"
-        else
-            log "ERROR: Device $DISK not accessible via lsblk either"
-            log "Available block devices:"
-            ls -la /dev/sd* /dev/nvme* /dev/vd* 2>/dev/null || true
-            lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
-            return 1
-        fi
-    else
-        log "Device $DISK passed standard block device test"
-    fi
-    
-    # Final verification: try to get device size
-    local device_size
-    if device_size=$(lsblk -b -d -n -o SIZE "$DISK" 2>/dev/null); then
-        log "Verified disk $DISK is accessible (size: $device_size bytes)"
-    else
-        log "ERROR: Cannot read size of disk $DISK"
+    if ! fdisk -l "$DISK" >/dev/null 2>&1; then
+        log "ERROR: Cannot access disk $DISK with fdisk"
+        log "Available disks:"
+        fdisk -l 2>/dev/null | grep "^Disk /dev/" | head -5
         return 1
     fi
+    
+    log "Verified disk $DISK is accessible"
     
     # Show disk information before partitioning
     log "Disk information before partitioning:"
