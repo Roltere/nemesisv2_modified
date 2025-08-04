@@ -25,8 +25,10 @@ detect_disk() {
     # Find the first available disk with sufficient size (>= 8GB)
     for disk in "${disk_candidates[@]}"; do
         log "Checking disk candidate: $disk"
-        if [ -b "$disk" ]; then
-            log "Device $disk exists as block device"
+        
+        # More flexible device existence check
+        if [ -e "$disk" ] && ([ -b "$disk" ] || lsblk "$disk" >/dev/null 2>&1); then
+            log "Device $disk exists and is accessible"
             
             # Check if this disk is currently mounted as root or boot (ISO system)
             if lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso"; then
@@ -45,7 +47,7 @@ detect_disk() {
                 log "Disk $disk too small (${size_gb}GB < 8GB required)"
             fi
         else
-            log "Device $disk does not exist or is not a block device"
+            log "Device $disk does not exist or is not accessible"
         fi
     done
     
@@ -70,7 +72,7 @@ detect_disk() {
             continue
         fi
         
-        if [ -b "$disk" ]; then
+        if [ -e "$disk" ] && ([ -b "$disk" ] || lsblk "$disk" >/dev/null 2>&1); then
             local size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || echo "0")
             local size_gb=$((size_bytes / 1024 / 1024 / 1024))
             if [ "$size_gb" -ge 8 ]; then
@@ -80,6 +82,8 @@ detect_disk() {
             else
                 log "Disk $disk too small: ${size_gb}GB < 8GB required"
             fi
+        else
+            log "Disk $disk exists but not accessible as block device"
         fi
     done <<< "$found_disks"
     
@@ -110,15 +114,54 @@ setup_disk() {
     fi
     log "Using disk: $DISK"
     
-    # Verify the detected disk is actually accessible
+    # Verify the detected disk is actually accessible with multiple methods
+    log "Verifying disk $DISK accessibility..."
+    
+    # Method 1: Standard block device test
     if [ ! -b "$DISK" ]; then
-        log "ERROR: Detected disk $DISK is not a valid block device!"
-        log "Available block devices:"
-        ls -la /dev/sd* /dev/nvme* /dev/vd* 2>/dev/null || true
-        lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
+        log "WARNING: $DISK failed standard block device test"
+        
+        # Method 2: Check if device exists and try to access it
+        if [ ! -e "$DISK" ]; then
+            log "ERROR: Device $DISK does not exist"
+            log "Available block devices:"
+            ls -la /dev/sd* /dev/nvme* /dev/vd* 2>/dev/null || true
+            lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
+            return 1
+        fi
+        
+        # Method 3: Try to read device info with udevadm (if available)
+        if command -v udevadm >/dev/null 2>&1; then
+            log "Checking device with udevadm..."
+            if udevadm info --name="$DISK" >/dev/null 2>&1; then
+                log "Device $DISK recognized by udev"
+            else
+                log "WARNING: Device $DISK not recognized by udev"
+            fi
+        fi
+        
+        # Method 4: Try to access with lsblk specifically
+        if lsblk "$DISK" >/dev/null 2>&1; then
+            log "Device $DISK accessible via lsblk - proceeding despite block device test failure"
+        else
+            log "ERROR: Device $DISK not accessible via lsblk either"
+            log "Available block devices:"
+            ls -la /dev/sd* /dev/nvme* /dev/vd* 2>/dev/null || true
+            lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
+            return 1
+        fi
+    else
+        log "Device $DISK passed standard block device test"
+    fi
+    
+    # Final verification: try to get device size
+    local device_size
+    if device_size=$(lsblk -b -d -n -o SIZE "$DISK" 2>/dev/null); then
+        log "Verified disk $DISK is accessible (size: $device_size bytes)"
+    else
+        log "ERROR: Cannot read size of disk $DISK"
         return 1
     fi
-    log "Verified disk $DISK is accessible as block device"
     
     # Show disk information before partitioning
     log "Disk information before partitioning:"
