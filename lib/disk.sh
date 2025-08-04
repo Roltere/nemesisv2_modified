@@ -27,6 +27,13 @@ detect_disk() {
         log "Checking disk candidate: $disk"
         if [ -b "$disk" ]; then
             log "Device $disk exists as block device"
+            
+            # Check if this disk is currently mounted as root or boot (ISO system)
+            if lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso"; then
+                log "Skipping $disk: currently mounted as system disk or ISO"
+                continue
+            fi
+            
             local size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || echo "0")
             local size_gb=$((size_bytes / 1024 / 1024 / 1024))
             
@@ -44,25 +51,51 @@ detect_disk() {
     
     # If no standard disks found, try to find ANY available disk
     log "No standard disk found, searching for any suitable disk..."
-    local found_disks=$(lsblk -d -n -o NAME,SIZE | grep -v loop | grep -v sr | head -5)
+    local found_disks=$(lsblk -d -n -o NAME,SIZE,TYPE | grep -v loop | grep -v sr | grep -v rom | grep -v part | head -5)
     log "Found block devices: $found_disks"
     
     # Try to find a suitable disk from lsblk output
-    while read -r name size; do
+    while read -r name size type; do
         local disk="/dev/$name"
+        
+        # Skip if it's a read-only device or mounted root filesystem
+        if [ "$type" = "rom" ] || [ "$type" = "part" ]; then
+            log "Skipping $disk: type=$type (not a writable disk)"
+            continue
+        fi
+        
+        # Check if this disk is currently mounted as root or boot
+        if lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso"; then
+            log "Skipping $disk: currently mounted as system disk or ISO"
+            continue
+        fi
+        
         if [ -b "$disk" ]; then
             local size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || echo "0")
             local size_gb=$((size_bytes / 1024 / 1024 / 1024))
             if [ "$size_gb" -ge 8 ]; then
-                log "Found alternative suitable disk: $disk (${size_gb}GB)"
+                log "Found alternative suitable disk: $disk (${size_gb}GB, type=$type)"
                 echo "$disk"
                 return 0
+            else
+                log "Disk $disk too small: ${size_gb}GB < 8GB required"
             fi
         fi
     done <<< "$found_disks"
     
     log "No suitable disk found automatically. Available block devices:"
     lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
+    log ""
+    log "IMPORTANT: The installer needs a physical disk separate from the ISO."
+    log "Common issues:"
+    log "  - No additional disk attached (VM needs a second disk)"
+    log "  - All disks are too small (minimum 8GB required)"
+    log "  - Target disk is currently mounted"
+    log ""
+    log "To specify a disk manually, set TARGET_DISK environment variable:"
+    log "  export TARGET_DISK=/dev/sdX"
+    log "  $0"
+    log ""
     log "ERROR: Please set TARGET_DISK environment variable to specify disk"
     return 1
 }
