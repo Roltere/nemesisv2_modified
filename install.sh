@@ -296,3 +296,4 @@ if [[ -f /tmp/nemesis-install.log ]]; then
     echo "Installation log: /tmp/nemesis-install.log"
 fi
 checkpoint "All install modules completed in correct order."
+
