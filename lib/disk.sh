@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
 
-# Use the EXACT method from the working reference implementation
-detect_disk() {
-    echo "==> Auto-detecting installation disk using reference method..."
-    
-    # Use the exact command from working nemesis.sh
-    local disk
-    disk=$(fdisk -l | grep "dev" | grep -o -P "(?=/).*(?=:)" | cut -d$'\n' -f1)
-    
-    echo "Found disk: $disk"
-    echo "$disk"
-    return 0
-}
-
 setup_disk() {
     echo "==> Setting up disk using reference implementation approach..."
     
@@ -50,7 +37,6 @@ EOF
     
     # Set up partition variables like the reference
     echo "==> Setting up partition variables..."
-    # Always assume VM mode for simplicity (like reference does in VM)
     diskpart1=${disk}1
     diskpart2=${disk}2
     
@@ -93,3 +79,4 @@ EOF
     return 0
 }
 
+echo "DEBUG: disk.sh loaded successfully - setup_disk function defined"
