@@ -1,9 +1,82 @@
 #!/usr/bin/env bash
 
-# Set your target disk here (or detect it)
-DISK="/dev/sda"
+detect_disk() {
+    echo "==> Auto-detecting installation disk..."
+    
+    # If TARGET_DISK environment variable is set, use it
+    if [ -n "${TARGET_DISK:-}" ]; then
+        echo "Using TARGET_DISK: $TARGET_DISK"
+        echo "$TARGET_DISK"
+        return 0
+    fi
+    
+    # Get all block devices, excluding the ISO/live system
+    echo "Scanning for available disks..."
+    
+    # List all disks and their mount points
+    while read -r name size type mountpoint; do
+        [ -z "$name" ] && continue
+        
+        local disk="/dev/$name"
+        
+        # Skip if not a disk (e.g., partitions, loop devices)
+        [ "$type" != "disk" ] && continue
+        
+        # Skip if mounted as root, boot, or live system
+        if echo "$mountpoint" | grep -q "^/$\|^/boot\|/run/archiso\|/run/live"; then
+            echo "Skipping $disk: mounted as live system ($mountpoint)"
+            continue
+        fi
+        
+        # Check if any partitions are mounted as live system
+        local skip_disk=false
+        while read -r part_name part_size part_type part_mount; do
+            if [[ "$part_name" == "$name"* ]] && echo "$part_mount" | grep -q "^/$\|^/boot\|/run/archiso\|/run/live"; then
+                echo "Skipping $disk: partition mounted as live system"
+                skip_disk=true
+                break
+            fi
+        done < <(lsblk -rno NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null)
+        
+        [ "$skip_disk" = true ] && continue
+        
+        # Check minimum size (8GB) - convert size to GB for comparison
+        local size_gb=0
+        if [[ "$size" == *"T" ]]; then
+            size_gb=$(echo "$size" | sed 's/[^0-9.]//g' | cut -d. -f1)
+            size_gb=$((size_gb * 1000))
+        elif [[ "$size" == *"G" ]]; then
+            size_gb=$(echo "$size" | sed 's/[^0-9.]//g' | cut -d. -f1)
+        elif [[ "$size" == *"M" ]]; then
+            local size_mb=$(echo "$size" | sed 's/[^0-9.]//g' | cut -d. -f1)
+            size_gb=$((size_mb / 1000))
+        fi
+        
+        if [ "$size_gb" -lt 8 ]; then
+            echo "Skipping $disk: too small ($size)"
+            continue
+        fi
+        
+        echo "Found suitable disk: $disk ($size)"
+        echo "$disk"
+        return 0
+        
+    done < <(lsblk -rno NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null)
+    
+    echo "ERROR: No suitable disk found"
+    echo "Available devices:"
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+    return 1
+}
 
 setup_disk() {
+    echo "==> Detecting target disk..."
+    
+    if ! DISK=$(detect_disk); then
+        echo "ERROR: Disk detection failed"
+        return 1
+    fi
+    
     echo "==> Starting disk setup for $DISK"
 
     # 1. Check device exists and is a block device
