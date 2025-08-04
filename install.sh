@@ -169,8 +169,15 @@ VC
 
 # Network
 echo "$hostname" > /etc/hostname
+# ensure resolv.conf isn’t mounted (lazy unmount if necessary)
+umount -l /etc/resolv.conf 2>/dev/null || true
+
+# now delete whatever is left (file, symlink, etc.)
 rm -f /etc/resolv.conf
-ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
+# recreate the correct stub symlink
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
 cat > /usr/lib/NetworkManager/conf.d/20-connectivity.conf << NM
 [connectivity]
 enabled=false
