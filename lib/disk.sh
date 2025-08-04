@@ -10,21 +10,34 @@ detect_disk() {
         return 0
     fi
     
-    # Get all block devices, excluding the ISO/live system
-    echo "Scanning for available disks..."
+    # Show what's available for debugging
+    echo "DEBUG: All available block devices:"
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || echo "lsblk failed"
     
-    # List all disks and their mount points
+    echo "DEBUG: Available devices in /dev:"
+    ls -la /dev/sd* /dev/vd* /dev/nvme* /dev/hd* 2>/dev/null || echo "No standard block devices found"
+    
+    # Get all block devices, excluding the ISO/live system
+    echo "Scanning for suitable installation disks..."
+    
+    # First, try to find disks using lsblk
+    local found_disk=""
     while read -r name size type mountpoint; do
         [ -z "$name" ] && continue
         
         local disk="/dev/$name"
         
+        echo "DEBUG: Checking $name (type=$type, size=$size, mount=$mountpoint)"
+        
         # Skip if not a disk (e.g., partitions, loop devices)
-        [ "$type" != "disk" ] && continue
+        if [ "$type" != "disk" ]; then
+            echo "DEBUG: Skipping $disk: not a disk (type=$type)"
+            continue
+        fi
         
         # Skip if mounted as root, boot, or live system
         if echo "$mountpoint" | grep -q "^/$\|^/boot\|/run/archiso\|/run/live"; then
-            echo "Skipping $disk: mounted as live system ($mountpoint)"
+            echo "DEBUG: Skipping $disk: mounted as live system ($mountpoint)"
             continue
         fi
         
@@ -32,13 +45,19 @@ detect_disk() {
         local skip_disk=false
         while read -r part_name part_size part_type part_mount; do
             if [[ "$part_name" == "$name"* ]] && echo "$part_mount" | grep -q "^/$\|^/boot\|/run/archiso\|/run/live"; then
-                echo "Skipping $disk: partition mounted as live system"
+                echo "DEBUG: Skipping $disk: partition $part_name mounted as live system ($part_mount)"
                 skip_disk=true
                 break
             fi
         done < <(lsblk -rno NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null)
         
         [ "$skip_disk" = true ] && continue
+        
+        # Check if device actually exists
+        if [ ! -e "$disk" ]; then
+            echo "DEBUG: Skipping $disk: device file does not exist"
+            continue
+        fi
         
         # Check minimum size (8GB) - convert size to GB for comparison
         local size_gb=0
@@ -53,19 +72,43 @@ detect_disk() {
         fi
         
         if [ "$size_gb" -lt 8 ]; then
-            echo "Skipping $disk: too small ($size)"
+            echo "DEBUG: Skipping $disk: too small (${size_gb}GB < 8GB required)"
             continue
         fi
         
-        echo "Found suitable disk: $disk ($size)"
-        echo "$disk"
-        return 0
+        echo "Found suitable disk: $disk ($size, ${size_gb}GB)"
+        found_disk="$disk"
+        break
         
     done < <(lsblk -rno NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null)
     
+    # If lsblk method found a disk, return it
+    if [ -n "$found_disk" ]; then
+        echo "$found_disk"
+        return 0
+    fi
+    
+    # Fallback: manually check common disk device patterns
+    echo "DEBUG: Fallback - checking common disk patterns..."
+    for disk in /dev/sda /dev/sdb /dev/sdc /dev/vda /dev/vdb /dev/nvme0n1; do
+        if [ -e "$disk" ]; then
+            echo "DEBUG: Found device file: $disk"
+            # Check if it's mounted as live system
+            if ! lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot\|/run/archiso\|/run/live"; then
+                echo "Found fallback disk: $disk"
+                echo "$disk"
+                return 0
+            else
+                echo "DEBUG: Skipping $disk: mounted as live system"
+            fi
+        fi
+    done
+    
     echo "ERROR: No suitable disk found"
     echo "Available devices:"
-    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || echo "lsblk unavailable"
+    echo "Device files in /dev:"
+    ls -la /dev/sd* /dev/vd* /dev/nvme* 2>/dev/null || echo "No device files found"
     return 1
 }
 
