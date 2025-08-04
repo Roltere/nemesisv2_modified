@@ -10,237 +10,60 @@ wait_for_devices() {
 }
 
 detect_disk() {
-    log "=== DETECT_DISK FUNCTION START ==="
-    log "Auto-detecting installation disk..."
+    log "Auto-detecting installation disk using reference method..."
     
     # If TARGET_DISK is set, use it
     if [ -n "${TARGET_DISK:-}" ]; then
-        log "DEBUG: TARGET_DISK is set to: $TARGET_DISK"
-        wait_for_devices
-        if fdisk -l "$TARGET_DISK" >/dev/null 2>&1; then
-            log "DEBUG: TARGET_DISK $TARGET_DISK is accessible"
-            echo "$TARGET_DISK"
-            return 0
-        else
-            log "WARNING: Specified TARGET_DISK=$TARGET_DISK not found or not accessible"
-        fi
-    else
-        log "DEBUG: No TARGET_DISK environment variable set"
+        log "Using specified TARGET_DISK: $TARGET_DISK"
+        echo "$TARGET_DISK"
+        return 0
     fi
     
-    # Wait for devices to be available
-    log "DEBUG: Waiting for devices..."
+    # Wait for devices
     wait_for_devices
     
-    # Use fdisk -l to discover disks (more reliable in early boot than lsblk)
-    log "DEBUG: Scanning for available disks with fdisk..."
-    local fdisk_output
-    if ! fdisk_output=$(fdisk -l 2>/dev/null); then
-        log "ERROR: Cannot run fdisk to enumerate disks"
+    # Use the exact method from working reference implementation
+    log "Using fdisk to find first available disk..."
+    local disk
+    disk=$(fdisk -l 2>/dev/null | grep "dev" | grep -o -P "(?=/).*(?=:)" | cut -d$'\n' -f1 | head -1)
+    
+    log "Found disk candidate: '$disk'"
+    
+    if [ -z "$disk" ]; then
+        log "ERROR: No disk found by fdisk"
+        log "Available devices:"
+        fdisk -l 2>/dev/null | grep "^Disk /dev/" || true
         return 1
     fi
     
-    log "DEBUG: Raw fdisk output (first 10 lines):"
-    echo "$fdisk_output" | head -10 | while read line; do
-        log "DEBUG:   $line"
-    done
-    
-    # Extract disk device paths from fdisk output with better parsing
-    local available_disks
-    available_disks=$(echo "$fdisk_output" | grep "^Disk /dev/" | sed 's/^Disk \([^:]*\):.*/\1/' | head -10)
-    
-    log "DEBUG: Extracted available_disks: '$available_disks'"
-    
-    # Validate extracted paths
-    local validated_disks=""
-    while read -r disk; do
-        [ -z "$disk" ] && continue
-        # Clean up any whitespace and validate format
-        disk=$(echo "$disk" | tr -d ' \t\n\r')
-        if [[ "$disk" =~ ^/dev/[a-zA-Z0-9]+$ ]]; then
-            validated_disks="$validated_disks$disk"$'\n'
-            log "DEBUG: Validated disk path: '$disk'"
-        else
-            log "DEBUG: Invalid disk path rejected: '$disk'"
-        fi
-    done <<< "$available_disks"
-    
-    available_disks="$validated_disks"
-    
-    if [ -z "$available_disks" ]; then
-        log "ERROR: No disks found by fdisk"
-        log "DEBUG: Full fdisk output:"
-        echo "$fdisk_output" | while read line; do
-            log "DEBUG:   $line"
-        done
+    # Basic validation - skip if it's the boot/system disk
+    if lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso\|^/run/miso"; then
+        log "ERROR: Found disk $disk is currently the boot/system disk"
+        log "Please ensure you have a separate disk for installation"
         return 1
     fi
     
-    log "Available disks found by fdisk:"
-    echo "$available_disks" | while read disk; do
-        local size_info=$(echo "$fdisk_output" | grep "^Disk $disk:" | sed 's/.*: //')
-        log "  $disk: $size_info"
-    done
-    
-    # Find first suitable disk
-    log "DEBUG: Starting disk candidate evaluation..."
-    while read -r disk; do
-        [ -z "$disk" ] && continue
-        
-        # Clean and validate disk path
-        disk=$(echo "$disk" | tr -d ' \t\n\r')
-        if [[ ! "$disk" =~ ^/dev/[a-zA-Z0-9]+$ ]]; then
-            log "DEBUG: Skipping malformed disk path: '$disk'"
-            continue
-        fi
-        
-        # Check path length (Linux max is 255, but be conservative)
-        if [ ${#disk} -gt 50 ]; then
-            log "DEBUG: Skipping disk with excessively long path: '$disk'"
-            continue
-        fi
-        
-        log "DEBUG: Checking validated disk candidate: $disk"
-        
-        # Skip if mounted as system/ISO disk
-        local mount_check
-        mount_check=$(lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null || true)
-        log "DEBUG: Mount points for $disk: '$mount_check'"
-        
-        if echo "$mount_check" | grep -q "^/$\|^/boot$\|^/run/archiso\|^/run/miso"; then
-            log "DEBUG: Skipping $disk: currently mounted as system disk or ISO"
-            continue
-        fi
-        
-        # Get size from fdisk output
-        local size_line=$(echo "$fdisk_output" | grep "^Disk $disk:")
-        log "DEBUG: Size line for $disk: '$size_line'"
-        
-        if [ -z "$size_line" ]; then
-            log "DEBUG: Skipping $disk: cannot determine size"
-            continue
-        fi
-        
-        # Extract size in bytes (fdisk shows various formats, try to parse)
-        local size_gb=0
-        if echo "$size_line" | grep -q "GiB\|GB"; then
-            size_gb=$(echo "$size_line" | grep -o '[0-9]*\.*[0-9]*[[:space:]]*GiB\|GB' | grep -o '[0-9]*\.*[0-9]*' | head -1)
-            size_gb=${size_gb%.*}  # Remove decimal part
-        elif echo "$size_line" | grep -q "bytes"; then
-            local bytes=$(echo "$size_line" | grep -o '[0-9]*[[:space:]]*bytes' | grep -o '[0-9]*')
-            size_gb=$((bytes / 1024 / 1024 / 1024))
-        fi
-        
-        log "DEBUG: Calculated size for $disk: ${size_gb}GB"
-        
-        if [ "$size_gb" -lt 8 ]; then
-            log "DEBUG: Skipping $disk: too small (${size_gb}GB < 8GB required)"
-            continue
-        fi
-        
-        # Final verification - can we access this disk?
-        log "DEBUG: Testing fdisk access to $disk..."
-        if fdisk -l "$disk" >/dev/null 2>&1; then
-            log "SUCCESS: Selected suitable disk: $disk (${size_gb}GB)"
-            echo "$disk"
-            return 0
-        else
-            log "DEBUG: Skipping $disk: not accessible with fdisk"
-        fi
-    done <<< "$available_disks"
-    
-    log "DEBUG: No suitable disk found in candidate evaluation"
-    
-    # Final fallback: try the exact method from reference implementation
-    log "DEBUG: Trying fallback method using fdisk -l parsing..."
-    local fallback_disk
-    fallback_disk=$(fdisk -l 2>/dev/null | grep "dev" | grep -o -P "(?=/).*(?=:)" | cut -d$'\n' -f1 | head -1)
-    
-    if [ -n "$fallback_disk" ] && [[ "$fallback_disk" =~ ^/dev/[a-zA-Z0-9]+$ ]]; then
-        log "DEBUG: Fallback found disk: '$fallback_disk'"
-        
-        # Quick validation - not mounted as system
-        if ! lsblk -n -o MOUNTPOINT "$fallback_disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso\|^/run/miso"; then
-            log "DEBUG: Fallback disk not mounted as system, testing access..."
-            if fdisk -l "$fallback_disk" >/dev/null 2>&1; then
-                log "SUCCESS: Using fallback disk: $fallback_disk"
-                echo "$fallback_disk"
-                return 0
-            fi
-        fi
-    fi
-    
-    log "No suitable disk found automatically. Available block devices:"
-    lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
-    log ""
-    log "IMPORTANT: The installer needs a physical disk separate from the ISO."
-    log "Common issues:"
-    log "  - No additional disk attached (VM needs a second disk)"
-    log "  - All disks are too small (minimum 8GB required)"
-    log "  - Target disk is currently mounted"
-    log ""
-    log "To specify a disk manually, set TARGET_DISK environment variable:"
-    log "  export TARGET_DISK=/dev/sdX"
-    log "  $0"
-    log ""
-    log "ERROR: Please set TARGET_DISK environment variable to specify disk"
-    return 1
+    log "Selected disk: $disk"
+    echo "$disk"
+    return 0
 }
 
 setup_disk() {
-    log "=== DISK SETUP PHASE START ==="
-    log "Detecting target disk..."
+    log "Setting up disk partitions..."
     
-    # First, show what's available for debugging
-    log "DEBUG: Current environment check:"
-    log "DEBUG: Available disk info from fdisk:"
-    fdisk -l 2>/dev/null | grep "^Disk /dev/" | head -10 | while read line; do
-        log "DEBUG:   $line"
-    done
-    
-    log "DEBUG: Available disk info from lsblk:"
-    lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null | while read line; do
-        log "DEBUG:   $line"
-    done
-    
-    # Now try detection
-    log "DEBUG: Calling detect_disk function..."
-    DISK=$(detect_disk)
-    local detect_result=$?
-    
-    log "DEBUG: detect_disk returned: '$DISK' with exit code: $detect_result"
-    
-    if [ $detect_result -ne 0 ] || [ -z "$DISK" ]; then
-        log "FATAL: Disk detection failed."
-        log "detect_disk exit code: $detect_result"
-        log "detect_disk output: '$DISK'"
-        log "Available disks from fdisk:"
-        fdisk -l 2>/dev/null | grep "^Disk /dev/" | head -5
-        log "Available disks from lsblk:"
-        lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
-        log "Please set TARGET_DISK environment variable or ensure a suitable disk is available"
+    # Detect target disk
+    if ! DISK=$(detect_disk); then
+        log "FATAL: Disk detection failed"
         return 1
     fi
     
-    log "SUCCESS: Using detected disk: $DISK"
+    log "Using disk: $DISK"
     
-    # Verify the detected disk is accessible using fdisk
-    log "Verifying disk $DISK accessibility with fdisk..."
-    
-    local fdisk_test_output
-    fdisk_test_output=$(fdisk -l "$DISK" 2>&1)
-    local fdisk_result=$?
-    
-    log "DEBUG: fdisk -l '$DISK' exit code: $fdisk_result"
-    if [ $fdisk_result -ne 0 ]; then
-        log "ERROR: Cannot access disk $DISK with fdisk"
-        log "fdisk error output: $fdisk_test_output"
-        log "Available disks:"
-        fdisk -l 2>/dev/null | grep "^Disk /dev/" | head -5
+    # Verify accessibility
+    if ! fdisk -l "$DISK" >/dev/null 2>&1; then
+        log "ERROR: Cannot access disk $DISK"
         return 1
     fi
-    
-    log "SUCCESS: Verified disk $DISK is accessible"
     
     # Show disk information before partitioning
     log "Disk information before partitioning:"
