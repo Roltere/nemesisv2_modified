@@ -92,3 +92,4 @@ EOF
     echo "EFI partition: $diskpart1 mounted at /mnt/boot"
     return 0
 }
+
