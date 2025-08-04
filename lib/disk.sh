@@ -1,91 +1,108 @@
 #!/usr/bin/env bash
 
+wait_for_devices() {
+    log "Waiting for device enumeration to complete..."
+    # Wait for udev to settle
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=10 2>/dev/null || true
+    fi
+    sleep 2  # Additional wait for device appearance
+}
+
 detect_disk() {
     log "Auto-detecting installation disk..."
     
     # If TARGET_DISK is set, use it
     if [ -n "${TARGET_DISK:-}" ]; then
-        if [ -b "$TARGET_DISK" ]; then
+        wait_for_devices
+        if [ -e "$TARGET_DISK" ] && ([ -b "$TARGET_DISK" ] || lsblk "$TARGET_DISK" >/dev/null 2>&1); then
             echo "$TARGET_DISK"
             return 0
         else
-            log "WARNING: Specified TARGET_DISK=$TARGET_DISK not found"
+            log "WARNING: Specified TARGET_DISK=$TARGET_DISK not found or not accessible"
         fi
     fi
     
-    # Common disk patterns in order of preference
-    local disk_candidates=(
-        "/dev/sda"      # Traditional SATA/SCSI
-        "/dev/nvme0n1"  # NVMe drives
-        "/dev/vda"      # Virtio (QEMU/KVM)
-        "/dev/xvda"     # Xen virtual disks
-        "/dev/mmcblk0"  # eMMC/SD cards
-    )
+    # Wait for devices to be available
+    wait_for_devices
     
-    # Find the first available disk with sufficient size (>= 8GB)
-    for disk in "${disk_candidates[@]}"; do
-        log "Checking disk candidate: $disk"
-        
-        # More flexible device existence check
-        if [ -e "$disk" ] && ([ -b "$disk" ] || lsblk "$disk" >/dev/null 2>&1); then
-            log "Device $disk exists and is accessible"
-            
-            # Check if this disk is currently mounted as root or boot (ISO system)
-            if lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso"; then
-                log "Skipping $disk: currently mounted as system disk or ISO"
-                continue
-            fi
-            
-            local size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || echo "0")
-            local size_gb=$((size_bytes / 1024 / 1024 / 1024))
-            
-            if [ "$size_gb" -ge 8 ]; then
-                log "Found suitable disk: $disk (${size_gb}GB)"
-                echo "$disk"
-                return 0
-            else
-                log "Disk $disk too small (${size_gb}GB < 8GB required)"
-            fi
-        else
-            log "Device $disk does not exist or is not accessible"
-        fi
+    # Get all available block devices dynamically
+    log "Scanning for available block devices..."
+    local all_devices
+    if ! all_devices=$(lsblk -d -n -o NAME,SIZE,TYPE,MODEL 2>/dev/null); then
+        log "ERROR: Cannot enumerate block devices with lsblk"
+        return 1
+    fi
+    
+    log "Available devices:"
+    echo "$all_devices" | while read line; do
+        log "  $line"
     done
     
-    # If no standard disks found, try to find ANY available disk
-    log "No standard disk found, searching for any suitable disk..."
-    local found_disks=$(lsblk -d -n -o NAME,SIZE,TYPE | grep -v loop | grep -v sr | grep -v rom | grep -v part | head -5)
-    log "Found block devices: $found_disks"
-    
-    # Try to find a suitable disk from lsblk output
-    while read -r name size type; do
+    # Find suitable disks (exclude unwanted types)
+    local suitable_candidates=()
+    while read -r name size type model; do
+        [ -z "$name" ] && continue
+        
         local disk="/dev/$name"
         
-        # Skip if it's a read-only device or mounted root filesystem
-        if [ "$type" = "rom" ] || [ "$type" = "part" ]; then
-            log "Skipping $disk: type=$type (not a writable disk)"
-            continue
-        fi
+        # Skip unwanted device types
+        case "$type" in
+            loop|rom|part) 
+                log "Skipping $disk: type=$type (not suitable for installation)"
+                continue
+                ;;
+        esac
         
-        # Check if this disk is currently mounted as root or boot
-        if lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso"; then
+        # Skip if mounted as system disk
+        if lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso\|^/run/miso"; then
             log "Skipping $disk: currently mounted as system disk or ISO"
             continue
         fi
         
-        if [ -e "$disk" ] && ([ -b "$disk" ] || lsblk "$disk" >/dev/null 2>&1); then
-            local size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || echo "0")
-            local size_gb=$((size_bytes / 1024 / 1024 / 1024))
-            if [ "$size_gb" -ge 8 ]; then
-                log "Found alternative suitable disk: $disk (${size_gb}GB, type=$type)"
-                echo "$disk"
-                return 0
-            else
-                log "Disk $disk too small: ${size_gb}GB < 8GB required"
-            fi
-        else
-            log "Disk $disk exists but not accessible as block device"
+        # Check size requirement
+        local size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || echo "0")
+        local size_gb=$((size_bytes / 1024 / 1024 / 1024))
+        
+        if [ "$size_gb" -lt 8 ]; then
+            log "Skipping $disk: too small (${size_gb}GB < 8GB required)"
+            continue
         fi
-    done <<< "$found_disks"
+        
+        # Check accessibility
+        if [ -e "$disk" ] && ([ -b "$disk" ] || lsblk "$disk" >/dev/null 2>&1); then
+            log "Found suitable disk candidate: $disk (${size_gb}GB, type=$type, model=${model:-unknown})"
+            suitable_candidates+=("$disk:$size_gb:$type:${model:-unknown}")
+        else
+            log "Disk $disk exists but not accessible"
+        fi
+    done <<< "$all_devices"
+    
+    # If we found suitable candidates, pick the best one
+    if [ ${#suitable_candidates[@]} -gt 0 ]; then
+        # Sort by preference: prefer non-USB, then by size (largest first)
+        local best_disk=""
+        local best_size=0
+        
+        for candidate in "${suitable_candidates[@]}"; do
+            IFS=':' read -r disk size type model <<< "$candidate"
+            
+            # Prefer non-USB devices
+            if [[ ! "$model" =~ [Uu][Ss][Bb] ]] && [ "$size" -gt "$best_size" ]; then
+                best_disk="$disk"
+                best_size="$size"
+            elif [ -z "$best_disk" ]; then
+                best_disk="$disk"
+                best_size="$size"
+            fi
+        done
+        
+        if [ -n "$best_disk" ]; then
+            log "Selected best disk: $best_disk (${best_size}GB)"
+            echo "$best_disk"
+            return 0
+        fi
+    fi
     
     log "No suitable disk found automatically. Available block devices:"
     lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
