@@ -112,9 +112,47 @@ PA
 curl https://blackarch.org/strap.sh | sh
 echo "Server = https://blackarch.org/blackarch/blackarch/os/x86_64" > /etc/pacman.d/blackarch-mirrorlist
 pacman --noconfirm -Syu
-pacman --noconfirm -Sy sudo base-devel yay networkmanager systemd-resolvconf \
-    openssh git neovim tmux wget p7zip neofetch noto-fonts ttf-noto-nerd \
-    fish less ldns
+# inside /mnt/nemesis.sh, before any installs:
+
+# 1) init keys & refresh sync DB
+pacman-key --init
+pacman-key --populate archlinux
+pacman -Sy
+
+# 2) list every tool you want to install
+packages=(
+  sudo
+  base-devel
+  yay
+  networkmanager
+  systemd-resolvconf
+  openssh
+  git
+  neovim
+  tmux
+  wget
+  p7zip
+  neofetch
+  noto-fonts
+  ttf-noto-nerd
+  fish
+  less
+  ldns
+)
+
+# 3) logfile for missing tools
+LOG=/var/log/nemesis-missing-packages.log
+touch "$LOG"
+
+# 4) loop, test & install or log failure
+for pkg in "${packages[@]}"; do
+  if pacman -Si "$pkg" &>/dev/null; then
+    pacman --noconfirm -S "$pkg"
+  else
+    echo "$(date '+%F %T')  package '$pkg' not found, skipping" >> "$LOG"
+  fi
+done
+
 
 # Time, locale, keyboard
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
