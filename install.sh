@@ -3,7 +3,7 @@ read -p "Run Arch-Nemesis install script? [Y/N]" continue
 if echo "$continue" | grep -iqFv y; then
     exit 0
 fi
-# testing12323422
+
 # Init variables
 hostname="main"
 username="main"
