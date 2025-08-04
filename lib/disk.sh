@@ -1,188 +1,94 @@
 #!/usr/bin/env bash
 
+# Use the EXACT method from the working reference implementation
 detect_disk() {
-    echo "==> Auto-detecting installation disk..."
+    echo "==> Auto-detecting installation disk using reference method..."
     
-    # If TARGET_DISK environment variable is set, use it
-    if [ -n "${TARGET_DISK:-}" ]; then
-        echo "Using TARGET_DISK: $TARGET_DISK"
-        echo "$TARGET_DISK"
-        return 0
-    fi
+    # Use the exact command from working nemesis.sh
+    local disk
+    disk=$(fdisk -l | grep "dev" | grep -o -P "(?=/).*(?=:)" | cut -d$'\n' -f1)
     
-    # Show what's available for debugging
-    echo "DEBUG: All available block devices:"
-    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || echo "lsblk failed"
-    
-    echo "DEBUG: Available devices in /dev:"
-    ls -la /dev/sd* /dev/vd* /dev/nvme* /dev/hd* 2>/dev/null || echo "No standard block devices found"
-    
-    # Get all block devices, excluding the ISO/live system
-    echo "Scanning for suitable installation disks..."
-    
-    # First, try to find disks using lsblk
-    local found_disk=""
-    while read -r name size type mountpoint; do
-        [ -z "$name" ] && continue
-        
-        local disk="/dev/$name"
-        
-        echo "DEBUG: Checking $name (type=$type, size=$size, mount=$mountpoint)"
-        
-        # Skip if not a disk (e.g., partitions, loop devices)
-        if [ "$type" != "disk" ]; then
-            echo "DEBUG: Skipping $disk: not a disk (type=$type)"
-            continue
-        fi
-        
-        # Skip if mounted as root, boot, or live system
-        if echo "$mountpoint" | grep -q "^/$\|^/boot\|/run/archiso\|/run/live"; then
-            echo "DEBUG: Skipping $disk: mounted as live system ($mountpoint)"
-            continue
-        fi
-        
-        # Check if any partitions are mounted as live system
-        local skip_disk=false
-        while read -r part_name part_size part_type part_mount; do
-            if [[ "$part_name" == "$name"* ]] && echo "$part_mount" | grep -q "^/$\|^/boot\|/run/archiso\|/run/live"; then
-                echo "DEBUG: Skipping $disk: partition $part_name mounted as live system ($part_mount)"
-                skip_disk=true
-                break
-            fi
-        done < <(lsblk -rno NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null)
-        
-        [ "$skip_disk" = true ] && continue
-        
-        # Check if device actually exists
-        if [ ! -e "$disk" ]; then
-            echo "DEBUG: Skipping $disk: device file does not exist"
-            continue
-        fi
-        
-        # Check minimum size (8GB) - convert size to GB for comparison
-        local size_gb=0
-        if [[ "$size" == *"T" ]]; then
-            size_gb=$(echo "$size" | sed 's/[^0-9.]//g' | cut -d. -f1)
-            size_gb=$((size_gb * 1000))
-        elif [[ "$size" == *"G" ]]; then
-            size_gb=$(echo "$size" | sed 's/[^0-9.]//g' | cut -d. -f1)
-        elif [[ "$size" == *"M" ]]; then
-            local size_mb=$(echo "$size" | sed 's/[^0-9.]//g' | cut -d. -f1)
-            size_gb=$((size_mb / 1000))
-        fi
-        
-        if [ "$size_gb" -lt 8 ]; then
-            echo "DEBUG: Skipping $disk: too small (${size_gb}GB < 8GB required)"
-            continue
-        fi
-        
-        echo "Found suitable disk: $disk ($size, ${size_gb}GB)"
-        found_disk="$disk"
-        break
-        
-    done < <(lsblk -rno NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null)
-    
-    # If lsblk method found a disk, return it
-    if [ -n "$found_disk" ]; then
-        echo "$found_disk"
-        return 0
-    fi
-    
-    # Fallback: manually check common disk device patterns
-    echo "DEBUG: Fallback - checking common disk patterns..."
-    for disk in /dev/sda /dev/sdb /dev/sdc /dev/vda /dev/vdb /dev/nvme0n1; do
-        if [ -e "$disk" ]; then
-            echo "DEBUG: Found device file: $disk"
-            # Check if it's mounted as live system
-            if ! lsblk -n -o MOUNTPOINT "$disk" 2>/dev/null | grep -q "^/$\|^/boot\|/run/archiso\|/run/live"; then
-                echo "Found fallback disk: $disk"
-                echo "$disk"
-                return 0
-            else
-                echo "DEBUG: Skipping $disk: mounted as live system"
-            fi
-        fi
-    done
-    
-    echo "ERROR: No suitable disk found"
-    echo "Available devices:"
-    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || echo "lsblk unavailable"
-    echo "Device files in /dev:"
-    ls -la /dev/sd* /dev/vd* /dev/nvme* 2>/dev/null || echo "No device files found"
-    return 1
-}
-
-setup_disk() {
-    echo "==> Detecting target disk..."
-    
-    if ! DISK=$(detect_disk); then
-        echo "ERROR: Disk detection failed"
-        return 1
-    fi
-    
-    echo "==> Starting disk setup for $DISK"
-
-    # 1. Check device exists and is a block device
-    if [[ ! -b "$DISK" ]]; then
-        echo "ERROR: Device $DISK does not exist or is not a block device."
-        return 1
-    fi
-
-    # 2. Unmount anything that might be mounted (just in case)
-    echo "==> Unmounting possible partitions on $DISK"
-    for part in $(ls ${DISK}?* 2>/dev/null); do
-        umount "$part" 2>/dev/null || true
-        swapoff "$part" 2>/dev/null || true
-    done
-
-    # 3. Zap (remove) any partition table/signatures
-    echo "==> Wiping partition table on $DISK"
-    sgdisk --zap-all "$DISK" || {
-        echo "WARNING: sgdisk failed (may be OK if disk is already blank)"
-    }
-
-    # 4. Create GPT partition table
-    echo "==> Creating GPT partition table on $DISK"
-    parted -s "$DISK" mklabel gpt || {
-        echo "ERROR: Could not create GPT partition table on $DISK"
-        return 1
-    }
-
-    # 5. Create single partition (root, 1MiB to 100%)
-    echo "==> Creating root partition on $DISK"
-    parted -s "$DISK" mkpart primary ext4 1MiB 100% || {
-        echo "ERROR: Failed to create root partition"
-        return 1
-    }
-
-    # 6. Wait for the kernel to pick up the partition
-    partprobe "$DISK"
-    sleep 2
-
-    # 7. Get the partition name (usually /dev/sda1)
-    ROOT_PART="${DISK}1"
-    if [[ ! -b "$ROOT_PART" ]]; then
-        # Some systems may use e.g. /dev/nvme0n1p1
-        ROOT_PART=$(ls ${DISK}?* 2>/dev/null | head -n1)
-    fi
-
-    if [[ ! -b "$ROOT_PART" ]]; then
-        echo "ERROR: Partition was not created properly."
-        return 1
-    fi
-
-    # 8. Format as ext4
-    echo "==> Formatting $ROOT_PART as ext4"
-    mkfs.ext4 -F "$ROOT_PART" || {
-        echo "ERROR: Failed to format partition $ROOT_PART"
-        return 1
-    }
-
-    echo "==> Disk setup complete."
+    echo "Found disk: $disk"
+    echo "$disk"
     return 0
 }
 
-# Only run if not sourced
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    setup_disk
-fi
+setup_disk() {
+    echo "==> Setting up disk using reference implementation approach..."
+    
+    # Get disk using exact reference method
+    disk=$(fdisk -l | grep "dev" | grep -o -P "(?=/).*(?=:)" | cut -d$'\n' -f1)
+    
+    if [ -z "$disk" ]; then
+        echo "ERROR: No disk detected by fdisk"
+        echo "Available devices from fdisk:"
+        fdisk -l
+        return 1
+    fi
+    
+    echo "Using disk: $disk"
+    
+    # Use reference implementation partitioning approach
+    echo "==> Creating GPT partition table..."
+    echo "label: gpt" | sfdisk --no-reread --force $disk || {
+        echo "ERROR: Failed to create GPT label"
+        return 1
+    }
+    
+    echo "==> Creating partitions..."
+    sfdisk --no-reread --force $disk << EOF || {
+        echo "ERROR: Failed to create partitions"
+        return 1
+    }
+,260M,U,*
+;
+EOF
+    
+    # Wait for partitions to appear
+    sleep 2
+    partprobe $disk 2>/dev/null || true
+    
+    # Set up partition variables like the reference
+    echo "==> Setting up partition variables..."
+    # Always assume VM mode for simplicity (like reference does in VM)
+    diskpart1=${disk}1
+    diskpart2=${disk}2
+    
+    echo "EFI partition: $diskpart1"
+    echo "Root partition: $diskpart2"
+    
+    # Format the partitions
+    echo "==> Formatting EFI partition..."
+    mkfs.fat -F32 "$diskpart1" || {
+        echo "ERROR: Failed to format EFI partition"
+        return 1
+    }
+    
+    echo "==> Formatting root partition..."  
+    mkfs.ext4 -F "$diskpart2" || {
+        echo "ERROR: Failed to format root partition"
+        return 1
+    }
+    
+    # Mount the partitions
+    echo "==> Mounting partitions..."
+    mount "$diskpart2" /mnt || {
+        echo "ERROR: Failed to mount root partition"
+        return 1
+    }
+    
+    mkdir -p /mnt/boot || {
+        echo "ERROR: Failed to create boot directory"
+        return 1
+    }
+    
+    mount "$diskpart1" /mnt/boot || {
+        echo "ERROR: Failed to mount EFI partition"
+        return 1
+    }
+    
+    echo "==> Disk setup complete using reference method."
+    echo "Root partition: $diskpart2 mounted at /mnt"
+    echo "EFI partition: $diskpart1 mounted at /mnt/boot"
+    return 0
+}
