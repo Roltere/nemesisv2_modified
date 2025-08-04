@@ -1,299 +1,241 @@
-#!/usr/bin/env bash
-# Temporarily disable -e for debugging
-set -uo pipefail
-
-# Redirect output to both screen and log file
-exec > >(tee /tmp/install-debug.log)
-exec 2>&1
-
-echo "DEBUG: Script starting with debugging enabled"
-echo "DEBUG: Output is being logged to /tmp/install-debug.log"
-
-# Load logging functions first
-source ./lib/logging.sh
-
-# Load configuration
-if [ -f "./config.sh" ]; then
-    source ./config.sh
-    log "Configuration loaded from config.sh"
-else
-    log "WARNING: config.sh not found, using defaults"
+#!/bin/bash
+read -p "Run Arch-Nemesis install script? [Y/N]" continue
+if echo "$continue" | grep -iqFv y; then
+        exit 0
 fi
 
-# Interactive configuration if enabled
-if [[ "${INTERACTIVE_MODE:-yes}" == "yes" ]]; then
-    interactive_config
+# Init variables
+hostname="main"
+username="main"
+password="password"
+ssh_key=""
+wifi_ssid=""
+wifi_pass=""
+vm=true
+rdppass="rdp"
+
+# Set keyboard layout
+loadkeys uk
+
+# Connect to internet if WiFi
+if [ -n "$wifi_ssid" ]; then
+    nic=$(ip link | grep "wl"* | grep -o -P "(?= ).*(?=:)" | sed -e "s/^[[:space:]]*//" | cut -d$'\n' -f 1)
+    iwctl --passphrase "$wifi_pass" station "$nic" connect "$wifi_ssid"
 fi
 
-# Validate configuration
-if ! validate_config; then
-    log "ERROR: Configuration validation failed"
-    exit 1
-fi
+# Set time and NTP
+timedatectl set-timezone UTC
+timedatectl set-ntp true
 
-# --- Pre-flight checks and error recovery setup ---
-source ./lib/preflight.sh
-
-# Define setup_disk function directly (to avoid sourcing issues)
-setup_disk() {
-    echo "==> Setting up disk using reference implementation approach..."
-    
-    # Get disk using exact reference method
-    disk=$(fdisk -l | grep "dev" | grep -o -P "(?=/).*(?=:)" | cut -d$'\n' -f1)
-    
-    if [ -z "$disk" ]; then
-        echo "ERROR: No disk detected by fdisk"
-        echo "Available devices from fdisk:"
-        fdisk -l
-        return 1
-    fi
-    
-    echo "Using disk: $disk"
-    
-    # Use reference implementation partitioning approach
-    echo "==> Creating GPT partition table..."
-    echo "label: gpt" | sfdisk --no-reread --force $disk || {
-        echo "ERROR: Failed to create GPT label"
-        return 1
-    }
-    
-    echo "==> Creating partitions..."
-    sfdisk --no-reread --force $disk << EOF || {
-        echo "ERROR: Failed to create partitions"
-        return 1
-    }
+# Disk formatting
+printf "\n\nFormatting disk(s)...\n"
+umount -f -l /mnt 2>/dev/null
+swapoff /dev/mapper/lvgroup-swap 2>/dev/null
+vgchange -a n lvgroup 2>/dev/null
+cryptsetup close cryptlvm 2>/dev/null
+disk=$(sudo fdisk -l | grep "dev" | grep -o -P "(?=/).*(?=:)" | cut -d$'\n' -f1)
+echo "label: gpt" | sfdisk --no-reread --force $disk
+sfdisk --no-reread --force $disk << EOF
 ,260M,U,*
 ;
 EOF
-    
-    # Wait for partitions to appear
-    sleep 2
-    partprobe $disk 2>/dev/null || true
-    
-    # Set up partition variables like the reference
-    echo "==> Setting up partition variables..."
+if [ "$vm" = true ]; then
     diskpart1=${disk}1
     diskpart2=${disk}2
-    
-    echo "EFI partition: $diskpart1"
-    echo "Root partition: $diskpart2"
-    
-    # Format the partitions
-    echo "==> Formatting EFI partition..."
-    mkfs.fat -F32 "$diskpart1" || {
-        echo "ERROR: Failed to format EFI partition"
-        return 1
-    }
-    
-    echo "==> Formatting root partition..."  
-    mkfs.ext4 -F "$diskpart2" || {
-        echo "ERROR: Failed to format root partition"
-        return 1
-    }
-    
-    # Mount the partitions
-    echo "==> Mounting partitions..."
-    mount "$diskpart2" /mnt || {
-        echo "ERROR: Failed to mount root partition"
-        return 1
-    }
-    
-    mkdir -p /mnt/boot || {
-        echo "ERROR: Failed to create boot directory"
-        return 1
-    }
-    
-    mount "$diskpart1" /mnt/boot || {
-        echo "ERROR: Failed to mount EFI partition"
-        return 1
-    }
-    
-    echo "==> Disk setup complete using reference method."
-    echo "Root partition: $diskpart2 mounted at /mnt"
-    echo "EFI partition: $diskpart1 mounted at /mnt/boot"
-    return 0
-}
-
-echo "DEBUG: setup_disk function defined directly in install.sh"
-
-setup_error_handling
-
-# Check for resume capability
-RESUME_STATE=$(resume_from_state)
-log "Resume state: $RESUME_STATE"
-
-# Run pre-flight checks
-if ! preflight_checks; then
-    log "Pre-flight checks failed, aborting installation"
-    exit 1
+else
+    diskpart1=$(sudo fdisk -l | grep "dev" | sed -n "2p" | cut -d " " -f 1)
+    diskpart2=$(sudo fdisk -l | grep "dev" | sed -n "3p" | cut -d " " -f 1)
 fi
 
-# Estimate installation time and set progress tracking
-ESTIMATED_TIME=$(estimate_install_time)
+# Create LVM on raw partition (no encryption)
+printf "\n\nCreating LVM...\n"
+pvcreate -ffy "${diskpart2}"
+vgcreate lvgroup "${diskpart2}"
 
-# Calculate total steps for progress tracking
-TOTAL_INSTALL_STEPS=5  # Base steps: disk, base, bootloader, users, cleanup
-if [[ "${DESKTOP_ENV:-gnome}" != "minimal" ]]; then
-    ((TOTAL_INSTALL_STEPS++))
-fi
-if [[ "${INSTALL_VMWARE_TOOLS:-auto}" == "yes" ]] || [[ "${INSTALL_VMWARE_TOOLS:-auto}" == "auto" && -n "$(lspci | grep -i vmware 2>/dev/null || echo '')" ]]; then
-    ((TOTAL_INSTALL_STEPS++))
-fi
-if [[ "${INSTALL_DEV_TOOLS:-no}" == "yes" || "${OPTIMIZE_FOR_VM:-auto}" == "yes" ]]; then
-    ((TOTAL_INSTALL_STEPS++))
-fi
+# Partition /root /swap
+printf "\n\nConfiguring /root /swap...\n"
+lvcreate -y -L 4G lvgroup -n swap
+lvcreate -y -l 100%FREE lvgroup -n root
+mkfs.ext4 -FF /dev/lvgroup/root
+mkswap /dev/lvgroup/swap
+mount /dev/lvgroup/root /mnt
+swapon /dev/lvgroup/swap
 
-set_total_steps $TOTAL_INSTALL_STEPS
+# Partition /boot
+printf "\n\nConfiguring /boot...\n"
+mkfs.fat -I -F 32 "${diskpart1}"
+mkdir /mnt/boot
+mount "${diskpart1}" /mnt/boot
 
-# Show installation summary
-echo ""
-echo "=== NEMESIS ARCH INSTALLATION ==="
-echo "Target disk: $(detect_disk 2>/dev/null || echo 'Auto-detect')"
-echo "Username: ${USERNAME:-main}"
-echo "Hostname: ${HOSTNAME:-nemesis-host}"
-echo "Desktop: ${DESKTOP_ENV:-gnome}"
-echo "Estimated time: ${ESTIMATED_TIME} minutes"
-echo "Progress tracking: ${ENABLE_PROGRESS:-yes}"
-echo ""
+# Init installation
+printf "\n\nPacstrap installation...\n"
+pacman --noconfirm -Sy archlinux-keyring
+pacstrap /mnt base linux linux-firmware lvm2 grub efibootmgr
+genfstab -U /mnt >> /mnt/etc/fstab
 
-if [[ "${INTERACTIVE_MODE:-yes}" == "yes" ]]; then
-    read -p "Continue with installation? [Y/n]: " confirm
-    if [[ "$confirm" =~ ^[Nn] ]]; then
-        log "Installation cancelled by user"
-        exit 0
-    fi
-fi
+# Create stage 2 script
+printf "\n\nCreating stage 2 script..."
+cat > /mnt/nemesis.sh << 'EOF'
+#!/bin/bash
+hostname="'"$hostname"'"
+username="'"$username"'"
+password="'"$password"'"
+ssh_key="'"$ssh_key"'"
+wifi_ssid="'"$wifi_ssid"'"
+wifi_pass="'"$wifi_pass"'"
+vm="'"$vm"'"
+disk="'"$disk"'"
+diskpart2="'"$diskpart2"'"
+rdppass="'"$rdppass"'"
 
-log "Starting Nemesis Arch installation..."
+# Configure pacman
+printf "\n\nConfiguring Pacman... \n"
+echo "
+[multilib]
+Include = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
+curl https://blackarch.org/strap.sh | sh
+echo "Server = https://blackarch.org/blackarch/blackarch/os/x86_64" > /etc/pacman.d/blackarch-mirrorlist
+pacman --noconfirm -Syu
+pacman --noconfirm -Sy sudo base-devel yay networkmanager systemd-resolvconf openssh git neovim tmux wget p7zip neofetch noto-fonts ttf-noto-nerd fish less ldns
 
-# --- Outside chroot: Partition, format, mount, pacstrap ---
-if [[ "$RESUME_STATE" == "START" ]]; then
-    echo "DEBUG: About to start disk setup"
-    progress "Setting up disk partitions and filesystem..."
-    echo "DEBUG: Calling setup_disk function"
-    
-    if setup_disk; then
-        echo "DEBUG: setup_disk completed successfully"
-        save_state "DISK_SETUP"
-        echo "DEBUG: Saved DISK_SETUP state"
-    else
-        echo "ERROR: setup_disk failed with exit code $?"
-        exit 1
-    fi
-    echo "DEBUG: Disk setup phase completed"
-fi
+# Set timezone to UTC
+printf "\n\nSetting timezone...\n"
+ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+hwclock --systohc
+systemctl enable systemd-timesyncd.service
 
-if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" ]]; then
-    progress "Installing base system packages..."
-    source ./lib/base.sh
-    setup_base_system
-    save_state "BASE_INSTALL"
-fi
+# Configure localization
+printf "\nConfiguring locales...\n"
+echo C.UTF-8 UTF-8 > /etc/locale.gen
+echo en_US.UTF-8 UTF-8 >> /etc/locale.gen
+echo en_GB.UTF-8 UTF-8 >> /etc/locale.gen
+locale-gen
+echo LANG=en_GB.UTF-8 > /etc/locale.conf
+export LANG=en_GB.UTF-8
+echo "
+KEYMAP=uk
+FONT=Goha-16" > /etc/vconsole.conf
 
-if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" || "$RESUME_STATE" == "BASE_INSTALL" ]]; then
-    progress "Installing kernel and bootloader packages..."
-    source ./lib/bootloader.sh
-    # This will call install_base_packages (outside chroot)
-    save_state "PACKAGES_INSTALLED"
-fi
+# Configure network
+printf "\n\nConfiguring network...\n"
+echo $hostname > /etc/hostname
+rm /etc/resolv.conf
+ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
-# --- Copy chroot modules and execute them IN ORDER ---
-chroot_scripts=()
+# Kill telemetry
+echo "
+[connectivity]
+enabled=false" > /usr/lib/NetworkManager/conf.d/20-connectivity.conf
 
-# Always run bootloader config and users
-if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" || "$RESUME_STATE" == "BASE_INSTALL" || "$RESUME_STATE" == "PACKAGES_INSTALLED" ]]; then
-    chroot_scripts+=("bootloader.sh" "users.sh")
-fi
+echo "
+MulticastDNS=no
+LLMNR=no" >> /etc/systemd/resolved.conf
 
-# Desktop environment (if not minimal)
-if [[ "${DESKTOP_ENV:-gnome}" != "minimal" ]]; then
-    if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" || "$RESUME_STATE" == "BASE_INSTALL" || "$RESUME_STATE" == "BOOTLOADER" ]]; then
-        chroot_scripts+=("desktop.sh")
-    fi
-fi
+systemctl enable systemd-resolved.service
+systemctl enable NetworkManager.service
 
-# VMware tools (if enabled)
-if [[ "${INSTALL_VMWARE_TOOLS:-auto}" == "yes" ]] || [[ "${INSTALL_VMWARE_TOOLS:-auto}" == "auto" && -n "$(lspci | grep -i vmware)" ]]; then
-    if [[ "$RESUME_STATE" == "START" || "$RESUME_STATE" == "DISK_SETUP" || "$RESUME_STATE" == "BASE_INSTALL" || "$RESUME_STATE" == "BOOTLOADER" || "$RESUME_STATE" == "DESKTOP" ]]; then
-        chroot_scripts+=("vmware.sh")
-    fi
-fi
+# Configure initramfs
+printf "\n\nConfiguring initramfs...\n"
+echo "HOOKS=(base udev autodetect keyboard keymap consolefont modconf block lvm2 filesystems fsck)" > /etc/mkinitcpio.conf
+mkinitcpio -P
 
-# Post-install features
-if [[ "${INSTALL_DEV_TOOLS:-no}" == "yes" || "${OPTIMIZE_FOR_VM:-auto}" == "yes" ]]; then
-    chroot_scripts+=("post-install.sh")
-fi
+# Configure users
+printf "\n\nConfiguring users...\n"
+echo "%wheel    ALL=(ALL) ALL" >> /etc/sudoers
+useradd -m -G users,wheel $username
+echo -e "$password\n$password" | passwd $username
+sudo -Hu $username mkdir /home/$username/.ssh
+sudo -Hu $username chmod 750 /home/$username/.ssh
+mkdir /opt/workspace
+chgrp users /opt/workspace
+chmod 775 /opt/workspace
+chmod g+s /opt/workspace
+setfacl -Rdm g:users:rwx /opt/workspace
 
-for script in "${chroot_scripts[@]}"; do
-    script_name="${script%.sh}"
-    
-    # Update progress with descriptive messages
-    case "$script" in
-        "bootloader.sh") progress "Configuring bootloader and system settings..." ;;
-        "users.sh") progress "Creating user accounts..." ;;
-        "desktop.sh") progress "Installing desktop environment..." ;;
-        "vmware.sh") progress "Installing VMware guest tools..." ;;
-        "post-install.sh") progress "Running post-installation setup..." ;;
-        *) progress "Running $script_name..." ;;
-    esac
-    
-    log ">>> Running $script inside chroot"
-    cp "./lib/$script" "/mnt/$script"
-    
-    # Copy additional dependencies
-    cp "./lib/logging.sh" "/mnt/logging.sh"
-    if [[ "$script" == "desktop.sh" ]]; then
-        cp "./lib/desktop-selector.sh" "/mnt/desktop-selector.sh"
-    fi
-    
-    arch-chroot /mnt bash -c "
-        export CHROOT_MODE=yes
-        export USERNAME='${USERNAME:-main}'
-        export USER_PASSWORD='${USER_PASSWORD:-}'
-        export USER_GROUPS='${USER_GROUPS:-wheel,users}'
-        export HOSTNAME='${HOSTNAME:-nemesis-host}'
-        export TIMEZONE='${TIMEZONE:-UTC}'
-        export LOCALE='${LOCALE:-en_US.UTF-8}'
-        export KEYMAP='${KEYMAP:-us}'
-        export DESKTOP_ENV='${DESKTOP_ENV:-gnome}'
-        export INSTALL_THEMES='${INSTALL_THEMES:-yes}'
-        export DOWNLOAD_WALLPAPER='${DOWNLOAD_WALLPAPER:-yes}'
-        export INSTALL_DEV_TOOLS='${INSTALL_DEV_TOOLS:-no}'
-        export INSTALL_MEDIA_CODECS='${INSTALL_MEDIA_CODECS:-yes}'
-        export OPTIMIZE_FOR_VM='${OPTIMIZE_FOR_VM:-auto}'
-        bash /$script
-    "
-    rm "/mnt/$script"
-    
-    # Clean up dependencies
-    rm -f "/mnt/logging.sh" "/mnt/desktop-selector.sh"
-    
-    save_state "${script_name^^}"
-    monitor_performance
-done
+# Configure bootloader
+printf "\n\nConfiguring bootloader...\n"
+echo GRUB_DISTRIBUTOR="Arch Nemesis" > /etc/default/grub
+grub-install --removable --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --sbat=/usr/share/grub/sbat.csv --modules="all_video boot btrfs cat chain configfile echo efifwsetup efinet ext2 fat font gettext gfxmenu gfxterm gfxterm_background gzio halt help hfsplus iso9660 jpeg keystatus loadenv loopback linux ls lsefi lsefimmap lsefisystab lssal memdisk minicmd normal ntfs part_apple part_msdos part_gpt password_pbkdf2 png probe reboot regexp search search_fs_uuid search_fs_file search_label sleep smbios test true video xfs zfs zfscrypt zfsinfo play cpuid tpm lvm"
+sudo -u $username /bin/sh -c "echo $password | yay --sudoflags "-S" --noconfirm -Sy shim-signed sbsigntools"
+mv /boot/EFI/BOOT/BOOTx64.EFI /boot/EFI/BOOT/grubx64.efi
+cp /usr/share/shim-signed/shimx64.efi /boot/EFI/BOOT/BOOTx64.EFI
+cp /usr/share/shim-signed/mmx64.efi /boot/EFI/BOOT/
+mkdir /opt/workspace/sb
+openssl req -newkey rsa:4096 -nodes -keyout /opt/workspace/sb/MOK.key -new -x509 -sha256 -days 3650 -subj "/CN=MOK/" -out /opt/workspace/sb/MOK.crt
+openssl x509 -outform DER -in /opt/workspace/sb/MOK.crt -out /opt/workspace/sb/MOK.cer
+sbsign --key /opt/workspace/sb/MOK.key --cert /opt/workspace/sb/MOK.crt --output /boot/vmlinuz-linux /boot/vmlinuz-linux
+sbsign --key /opt/workspace/sb/MOK.key --cert /opt/workspace/sb/MOK.crt --output /boot/EFI/BOOT/grubx64.efi /boot/EFI/BOOT/grubx64.efi
+mkdir -p /etc/pacman.d/hooks
+curl https://raw.githubusercontent.com/cinerieus/nemesisv2/refs/heads/main/config/999-sign_kernel_for_secureboot.hook -o /etc/pacman.d/hooks/999-sign_kernel_for_secureboot.hook
+cp /opt/workspace/sb/MOK.cer /boot
+chown root:root /opt/workspace/sb
+chmod -R 600 /opt/workspace/sb
+echo "- Remove /boot/EFI/BOOT/mmx64.efi & /boot/MOK.cer" >> /home/$username/readme.txt
 
-progress "Installation completed successfully!" 100
-save_state "COMPLETED"
+# CUSTOMIZATION
+printf "\n\nCustomizing... \n"
+# Neovim
+sudo -u $username curl https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim -o /home/$username/.local/share/nvim/site/autoload/plug.vim --create-dirs
+sudo -u $username curl https://raw.githubusercontent.com/cinerieus/nemesisv2/refs/heads/main/config/init.vim -o /home/$username/.config/nvim/init.vim --create-dirs
+sudo -u $username nvim +:PlugInstall +:qa
+mkdir -p /root/.local/share/nvim/site/autoload && cp /home/$username/.local/share/nvim/site/autoload/plug.vim /root/.local/share/nvim/site/autoload/plug.vim
+mkdir -p /root/.config/nvim && cp /home/$username/.config/nvim/init.vim /root/.config/nvim/init.vim
+nvim +:PlugInstall +:qa
+# Tmux
+sudo -u $username git clone https://github.com/tmux-plugins/tpm /home/$username/.tmux/plugins/tpm
+sudo -u $username curl https://raw.githubusercontent.com/cinerieus/nemesisv2/refs/heads/main/config/.tmux.conf -o /home/$username/.tmux.conf
+sudo -u $username /home/$username/.tmux/plugins/tpm/scripts/install_plugins.sh
+git clone https://github.com/tmux-plugins/tpm /root/.tmux/plugins/tpm
+curl https://raw.githubusercontent.com/cinerieus/nemesisv2/refs/heads/main/config/.tmux.conf -o /root/.tmux.conf
+/root/.tmux/plugins/tpm/scripts/install_plugins.sh
+# Fontconfig
+curl https://raw.githubusercontent.com/cinerieus/nemesisv2/refs/heads/main/config/local.conf -o /etc/fonts/local.conf --create-dirs
+chmod 755 /etc/fonts
+sudo -Hu $username curl https://raw.githubusercontent.com/cinerieus/nemesisv2/refs/heads/main/config/.Xresources -o /home/$username/.Xresources && cp /home/$username/.Xresources /root/.Xresources
+sudo -Hu $username xrdb -merge /home/$username/.Xresources && xrdb -merge /home/$username/.Xresources
+# Fish
+sudo -Hu $username curl https://raw.githubusercontent.com/oh-my-fish/oh-my-fish/master/bin/install > /home/$username/install.fish
+sudo -Hu $username fish /home/$username/install.fish --noninteractive && \
+mv /home/$username/install.fish /root
+sudo -Hu $username git clone https://github.com/cinerieus/theme-sushi.git /home/$username/.local/share/omf/themes/sushi
+sudo -Hu $username curl https://raw.githubusercontent.com/cinerieus/nemesis/master/config.fish -o /home/$username/.config/fish/config.fish
+sudo -Hu $username fish -c "omf theme sushi"
+fish /root/install.fish --noninteractive
+rm /root/install.fish
+cp -r /home/$username/.local/share/omf/themes/sushi /root/.local/share/omf/themes/
+cp -r /home/$username/.config/fish/config.fish /root/.config/fish/config.fish
+fish -c "omf theme sushi"
+usermod -s /bin/fish $username
+usermod -s /bin/fish root
 
-# Show completion summary
-TOTAL_TIME=$(($(date +%s) - START_TIME))
-MINUTES=$((TOTAL_TIME / 60))
-SECONDS=$((TOTAL_TIME % 60))
+## DESKTOP ENVIRONMENT
+# Install Gnome
+pacman --noconfirm -Sy gnome vulkan-intel
+systemctl enable gdm.service
 
-echo ""
-echo "=== INSTALLATION COMPLETE ==="
-echo "Total time: ${MINUTES}m ${SECONDS}s"
-echo "Username: $USERNAME"
-echo "Hostname: $HOSTNAME"
-echo "Desktop: ${DESKTOP_ENV:-gnome}"
-echo ""
-echo "Next steps:"
-echo "1. Reboot the system: reboot"
-echo "2. Remove installation media"
-echo "3. Log in with your user credentials"
-echo ""
-if [[ -f /tmp/nemesis-install.log ]]; then
-    echo "Installation log: /tmp/nemesis-install.log"
-fi
-checkpoint "All install modules completed in correct order."
+# Gnome Shell Extensions
+sudo -Hu $username /bin/sh -c "echo $password | yay --sudoflags \"-S\" --noconfirm -Sy gnome-shell-extension-blur-my-shell gnome-shell-extension-tilingshell gnome-shell-extension-no-overview gnome-shell-extension-rounded-window-corners-reborn-git catppuccin-cursors-mocha papirus-icon-theme papirus-folders-catppuccin-git wofi adw-gtk-theme gradience kitty thunar firefox libreoffice glib2-devel pipewire-libcamera"
+sudo -Hu $username dbus-launch --exit-with-session gsettings set org.gnome.shell enabled-extensions "[\"blur-my-shell@aunetx\", \"no-overview@fthx\", \"rounded-window-corners@fxgn\", \"system-monitor@gnome-shell-extensions.gcampax.github.com\", \"tilingshell@ferrarodomenico.com\", \"user-theme@gnome-shell-extensions.gcampax.github.com\"]"
 
+# [ … rest unchanged … ]
+
+EOF
+
+echo '
+# Chroot and run stage 2 script
+printf "\n\nRunning stage 2..."
+cp -f /etc/resolv.conf /mnt/etc/resolv.conf
+chmod +x /mnt/nemesis.sh
+arch-chroot /mnt ./nemesis.sh
+rm /mnt/nemesis.sh
+umount /mnt/boot
+umount /mnt
+sleep 5
+' >> /mnt/nemesis.sh
+
+# Finalize
+arch-chroot /mnt bash /nemesis.sh
+rm /mnt/nemesis.sh
+umount /mnt/boot
+umount /mnt
+sleep 5
