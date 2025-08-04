@@ -34,21 +34,30 @@ swapoff /dev/mapper/lvgroup-swap 2>/dev/null
 vgchange -a n lvgroup 2>/dev/null
 cryptsetup close cryptlvm 2>/dev/null
 
-disk=$(fdisk -l | grep "^/dev/" | head -n1 | cut -d: -f1)
+# pick the first real disk (e.g. /dev/sda, /dev/nvme0n1, etc.)
+disk=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1; exit}')
+
+if [ -z "$disk" ]; then
+  echo "No disk found — aborting."
+  exit 1
+fi
+
+echo "Formatting $disk as GPT…"
 echo "label: gpt" | sfdisk --no-reread --force "$disk"
 sfdisk --no-reread --force "$disk" << EOF
 ,260M,U,*
 ;
 EOF
 
+# Partition names
 if [ "$vm" = true ]; then
     diskpart1=${disk}1
     diskpart2=${disk}2
 else
-    # non-VM: assumes second+third /dev entries are your partitions
-    diskpart1=$(fdisk -l | grep "^/dev/" | sed -n "2p" | cut -d " " -f 1)
-    diskpart2=$(fdisk -l | grep "^/dev/" | sed -n "3p" | cut -d " " -f 1)
+    diskpart1=${disk}1
+    diskpart2=${disk}2
 fi
+
 
 # ——— NO LUKS ———
 # Create LVM on raw partition
