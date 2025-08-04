@@ -45,11 +45,27 @@ detect_disk() {
         log "DEBUG:   $line"
     done
     
-    # Extract disk device paths from fdisk output
+    # Extract disk device paths from fdisk output with better parsing
     local available_disks
-    available_disks=$(echo "$fdisk_output" | grep "^Disk /dev/" | grep -o "/dev/[^:]*" | head -10)
+    available_disks=$(echo "$fdisk_output" | grep "^Disk /dev/" | sed 's/^Disk \([^:]*\):.*/\1/' | head -10)
     
     log "DEBUG: Extracted available_disks: '$available_disks'"
+    
+    # Validate extracted paths
+    local validated_disks=""
+    while read -r disk; do
+        [ -z "$disk" ] && continue
+        # Clean up any whitespace and validate format
+        disk=$(echo "$disk" | tr -d ' \t\n\r')
+        if [[ "$disk" =~ ^/dev/[a-zA-Z0-9]+$ ]]; then
+            validated_disks="$validated_disks$disk"$'\n'
+            log "DEBUG: Validated disk path: '$disk'"
+        else
+            log "DEBUG: Invalid disk path rejected: '$disk'"
+        fi
+    done <<< "$available_disks"
+    
+    available_disks="$validated_disks"
     
     if [ -z "$available_disks" ]; then
         log "ERROR: No disks found by fdisk"
@@ -71,7 +87,20 @@ detect_disk() {
     while read -r disk; do
         [ -z "$disk" ] && continue
         
-        log "DEBUG: Checking disk candidate: $disk"
+        # Clean and validate disk path
+        disk=$(echo "$disk" | tr -d ' \t\n\r')
+        if [[ ! "$disk" =~ ^/dev/[a-zA-Z0-9]+$ ]]; then
+            log "DEBUG: Skipping malformed disk path: '$disk'"
+            continue
+        fi
+        
+        # Check path length (Linux max is 255, but be conservative)
+        if [ ${#disk} -gt 50 ]; then
+            log "DEBUG: Skipping disk with excessively long path: '$disk'"
+            continue
+        fi
+        
+        log "DEBUG: Checking validated disk candidate: $disk"
         
         # Skip if mounted as system/ISO disk
         local mount_check
@@ -121,6 +150,25 @@ detect_disk() {
     done <<< "$available_disks"
     
     log "DEBUG: No suitable disk found in candidate evaluation"
+    
+    # Final fallback: try the exact method from reference implementation
+    log "DEBUG: Trying fallback method using fdisk -l parsing..."
+    local fallback_disk
+    fallback_disk=$(fdisk -l 2>/dev/null | grep "dev" | grep -o -P "(?=/).*(?=:)" | cut -d$'\n' -f1 | head -1)
+    
+    if [ -n "$fallback_disk" ] && [[ "$fallback_disk" =~ ^/dev/[a-zA-Z0-9]+$ ]]; then
+        log "DEBUG: Fallback found disk: '$fallback_disk'"
+        
+        # Quick validation - not mounted as system
+        if ! lsblk -n -o MOUNTPOINT "$fallback_disk" 2>/dev/null | grep -q "^/$\|^/boot$\|^/run/archiso\|^/run/miso"; then
+            log "DEBUG: Fallback disk not mounted as system, testing access..."
+            if fdisk -l "$fallback_disk" >/dev/null 2>&1; then
+                log "SUCCESS: Using fallback disk: $fallback_disk"
+                echo "$fallback_disk"
+                return 0
+            fi
+        fi
+    fi
     
     log "No suitable disk found automatically. Available block devices:"
     lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
